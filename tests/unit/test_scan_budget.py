@@ -16,3 +16,13 @@ async def test_budget_waits_for_running_chunks_instead_of_giving_up():
     await b.settle(second, 0.2)
     await b.settle(1.8, 2.6 + 1e-9)
     assert await b.reserve(2.0) == 0.0  # spent 3.0 of 3.0: exhausted, nothing running
+
+
+async def test_no_chunk_starts_with_too_little_budget_to_finish():
+    b = _Budget(2.5)
+    first = await b.reserve(2.0)
+    waiter = asyncio.create_task(b.reserve(2.0))
+    await asyncio.sleep(0)
+    assert not waiter.done()  # only $0.50 left while the first chunk runs
+    await b.settle(first, 1.8)  # $0.70 left, nothing running: not enough for a useful chunk
+    assert await waiter == 0.0

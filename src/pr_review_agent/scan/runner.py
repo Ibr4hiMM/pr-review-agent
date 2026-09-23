@@ -23,7 +23,8 @@ from ..verify import verify_result
 from ..workspace import prepare_local_workspace, repo_slug
 from .planner import Chunk, plan_chunks
 
-MIN_CHUNK_BUDGET = 0.3
+# Below this a chunk can't finish (it hits the cap before returning anything), so the scan stops instead.
+MIN_CHUNK_BUDGET = 1.0
 
 
 @dataclass
