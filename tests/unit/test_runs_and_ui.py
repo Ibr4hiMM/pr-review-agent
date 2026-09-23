@@ -1,3 +1,4 @@
+import asyncio
 import json
 import subprocess
 import threading
@@ -224,6 +225,91 @@ def test_repo_info_and_jobs(server, repo):
     for body, message in bad:
         status, _, err = call(server, "/api/jobs", body)
         assert status == 400 and message in err["error"], (body, err)
+
+
+async def test_scan_record_keeps_what_is_needed_to_continue(tmp_path, monkeypatch):
+    from pr_review_agent import actions
+    from pr_review_agent.scan.runner import ScanOutcome
+
+    async def fake_scan(*_args):
+        return ScanOutcome(repo="me/shop", sha="a" * 40, chunks_done=1, chunks_total=3)
+
+    monkeypatch.setattr(actions, "run_scan", fake_scan)
+    settings = Settings(data_dir=tmp_path / "data", cache_dir=tmp_path / "cache")
+    first_id = "20260101-000000-scan-abcdef"
+    _, rec = await actions.scan(tmp_path, settings, None, print, ["shop"], 2.0, None, True, continues=first_id)
+    rec = load_run(settings.runs_dir, rec.id)
+    assert (rec.budget_usd, rec.projects, rec.uncommitted, rec.continues) == (2.0, ["shop"], True, first_id)
+    assert rec.unfinished() and list_runs(settings.runs_dir)[0]["continues"] == first_id
+    assert rec.scan_request() == {"repo_path": str(tmp_path.resolve()), "projects": ["shop"], "uncommitted": True}
+
+    # Runs saved before the projects were recorded: they're read back from the target.
+    old = rec.model_copy(update={"projects": [], "uncommitted": None, "target": f"{rec.repo_path} (api, web)"})
+    assert old.scan_request()["projects"] == ["api", "web"] and old.scan_request()["uncommitted"] is True
+    assert not rec.model_copy(update={"chunks_done": 3}).unfinished()
+
+
+def test_unfinished_scan_can_be_continued(server, repo):
+    runs_dir = server["app"].runs_dir
+
+    def scan_run(done, total, kind="scan"):
+        rec = new_run(
+            kind,
+            "shop",
+            str(repo),
+            "a" * 40,
+            "m",
+            Stats(cost_usd=2.0),
+            [],
+            [],
+            [],
+            chunks_done=done,
+            chunks_total=total,
+            repo_path=str(repo),
+            budget_usd=2.0,
+            projects=["shop"],
+            uncommitted=False,
+        )
+        save_run(rec, runs_dir)
+        return rec
+
+    rec = scan_run(1, 3)
+    status, _, job = call(server, f"/api/runs/{rec.id}/continue", {"budget_usd": 4})
+    assert status == 201 and job["title"] == "Scan shop (shop), continued"
+    assert job["params"] == {
+        "repo_path": str(repo.resolve()),
+        "projects": ["shop"],
+        "budget_usd": 4.0,
+        "uncommitted": False,
+        "continues": rec.id,
+    }
+
+    for done_rec in (scan_run(3, 3), scan_run(0, 0, "review-local")):
+        status, _, err = call(server, f"/api/runs/{done_rec.id}/continue", {"budget_usd": 4})
+        assert status == 400 and "stopped before reviewing every chunk" in err["error"]
+    status, _, err = call(server, f"/api/runs/{rec.id}/continue", {"budget_usd": 0.5})
+    assert status == 400 and "between $1.00" in err["error"]  # too little to review a single chunk
+
+
+def test_a_scan_is_not_continued_twice(tmp_path, repo):
+    started = threading.Event()
+    release = threading.Event()
+
+    async def slow(job, settings, progress):
+        started.set()
+        await asyncio.to_thread(release.wait, 5)
+        return "x"
+
+    jobs = JobManager(Settings(data_dir=tmp_path / "d", cache_dir=tmp_path / "c"), executor=slow)
+    run_id = "20260101-000000-scan-abcdef"
+    job = jobs.submit("scan", {"repo_path": str(repo), "budget_usd": 2, "continues": run_id})
+    assert started.wait(5) and jobs.continuing(run_id) is job
+    release.set()
+    for _ in range(100):
+        if job.status == "done":
+            break
+        time.sleep(0.02)
+    assert job.status == "done" and jobs.continuing(run_id) is None
 
 
 def test_job_errors_are_plain_language():

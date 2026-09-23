@@ -160,9 +160,8 @@ async def run_scan(
                 )
 
         async def do_chunk(i: int, chunk: Chunk) -> None:
-            if stop.is_set():
-                emit({"type": "chunk", "i": i, "state": "skipped"})
-                return
+            # Cached chunks cost nothing, so they count even once the budget has run out. This is what lets a
+            # re-run continue an unfinished scan: it only pays for the chunks that weren't reviewed.
             key = chunk.cache_key(ws.head, f"{PROMPT_VERSION}|{settings.model}|{settings.effort}")
             cached = cache_dir / f"{key}.json"
             if cached.exists():
@@ -172,6 +171,9 @@ async def run_scan(
                 out.cached_chunks += 1
                 emit({"type": "chunk", "i": i, "state": "cached", "proven": len(kept)})
                 found(i, kept)
+                return
+            if stop.is_set():
+                emit({"type": "chunk", "i": i, "state": "skipped"})
                 return
             async with sem:
                 granted = await budget.reserve(settings.review_budget_usd)

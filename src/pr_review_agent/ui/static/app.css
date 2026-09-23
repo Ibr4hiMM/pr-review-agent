@@ -119,6 +119,22 @@ code, pre, .row-where, .where, .path {
 
 .run-meta { color: var(--muted); font-size: var(--t-small); margin-top: 0.35rem; }
 
+.continue {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 40rem;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  background: var(--amber-wash);
+  font-size: var(--t-small);
+}
+.continue-title { font-size: var(--t-base); font-weight: 600; }
+.continue-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.75rem; }
+.continue-amount { display: flex; align-items: center; gap: 0.6rem; font-weight: 600; }
+.continue-row .input { width: 6rem; }
+.continue .field-error:empty { display: none; }
+
 .tally { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 1rem; }
 .tally div { display: flex; flex-direction: column; }
 .tally strong { font-size: var(--t-h2); font-weight: 600; line-height: 1.1; font-variant-numeric: tabular-nums; }
