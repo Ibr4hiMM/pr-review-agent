@@ -130,9 +130,17 @@ async function api(path, options = {}) {
     init.body = JSON.stringify(options.body);
   }
   const res = await fetch(path, init);
+  if (res.status === 401) showRestarted();
   const data = res.headers.get("Content-Type")?.includes("application/json") ? await res.json() : await res.text();
   if (!res.ok) throw new Error((data && data.error) || `Request failed (${res.status})`);
   return data;
+}
+
+function showRestarted() {
+  if (document.getElementById("restarted")) return;
+  document.body.append(h("div", { class: "restarted", id: "restarted", role: "alert" },
+    h("span", {}, "The dashboard was restarted, so this page is out of date."),
+    h("button", { class: "btn btn-primary", type: "button", onclick: () => location.reload() }, "Reload page")));
 }
 
 function segmented(label, options, current, onPick, cls = "") {
@@ -166,6 +174,15 @@ function go(runId, fp) {
 }
 
 const anims = []; // live animations on the current page, stopped when leaving it
+let pageEnter = false; // true until the first paint after navigating to a page
+
+// "page" plus the entrance class, but only for the first paint after navigation; re-draws
+// while you use the page must not replay the entrance (it made the form flicker).
+function pageClass(extra = "") {
+  const cls = `page${pageEnter ? " is-entering" : ""}${extra ? " " + extra : ""}`;
+  pageEnter = false;
+  return cls;
+}
 function stopAnims() {
   while (anims.length) anims.pop().destroy();
 }
@@ -177,6 +194,7 @@ async function route() {
   stopAnims();
   renderSidebar();
   if (r.page !== "run") {
+    pageEnter = true;
     app.dataset.mode = "page";
     app.dataset.view = "detail";
     if (r.page === "new") return renderNewScan();
@@ -768,8 +786,23 @@ function renderDetail(focus) {
 
 // ---------- new scan page ----------
 
-async function loadRepoInfo(path) {
+function newForm() {
+  return {
+    kind: "scan", path: "", checkedPath: null, info: null, infoError: null, checking: false, checkedAt: 0,
+    budget: { scan: 5, "review-local": 2, review: 2 }, projects: [], uncommitted: false, base: "", head: "",
+    recent: [], picker: false,
+    ghRepos: null, ghRepo: "", ghError: null, prState: "open", prs: null, prsError: null, prsLoading: false,
+    prNumber: null, prLink: "", post: false,
+  };
+}
+
+async function checkFolder(raw) {
   const form = state.form;
+  const path = String(raw || "").trim();
+  if (!path) {
+    form.infoError = "Choose or type the folder of a repository first.";
+    return renderNewScan();
+  }
   form.info = null;
   form.infoError = null;
   form.checking = true;
@@ -778,57 +811,171 @@ async function loadRepoInfo(path) {
     const info = await api(`/api/repo-info?path=${encodeURIComponent(path)}`);
     form.info = info;
     form.path = info.path;
+    form.checkedPath = info.path;
+    form.checkedAt = Date.now();
     form.projects = info.projects.filter((p) => p.enabled).map((p) => p.name);
     form.uncommitted = info.has_uncommitted;
     form.base = info.default_base;
     form.head = info.branches.includes(info.current_branch) && info.current_branch !== info.default_base
       ? info.current_branch : info.branches.find((b) => b !== info.default_base) || "";
-    if (info.slug && !form.target) form.target = `${info.slug}#`;
+    if (info.slug && !form.ghRepo) form.ghRepo = info.slug;
   } catch (e) {
     form.infoError = e.message;
+    form.checkedPath = null;
   }
   form.checking = false;
   renderNewScan();
 }
 
+async function chooseFolder() {
+  const form = state.form;
+  form.picking = true;
+  renderNewScan();
+  try {
+    const { path } = await api("/api/pick-folder", { body: {} });
+    form.picking = false;
+    if (path) {
+      form.path = path;
+      return checkFolder(path);
+    }
+  } catch (e) {
+    form.infoError = e.message;
+  }
+  form.picking = false;
+  renderNewScan();
+}
+
+async function loadPrs() {
+  const form = state.form;
+  if (!form.ghRepo) return;
+  form.prsLoading = true;
+  form.prsError = null;
+  form.prs = null;
+  form.prNumber = null;
+  renderNewScan();
+  try {
+    form.prs = await api(`/api/github/prs?repo=${encodeURIComponent(form.ghRepo)}&state=${form.prState}`);
+  } catch (e) {
+    form.prsError = e.message;
+  }
+  form.prsLoading = false;
+  renderNewScan();
+}
+
+async function loadGithub() {
+  const form = state.form;
+  if (form.ghRepos) return loadPrs();
+  form.ghRepos = [];
+  form.ghError = null;
+  renderNewScan();
+  try {
+    form.ghRepos = await api("/api/github/repos");
+    if (!form.ghRepo && form.ghRepos.length) form.ghRepo = form.ghRepos[0].slug;
+  } catch (e) {
+    form.ghError = e.message;
+  }
+  return loadPrs();
+}
+
+const PR_STATE = { open: "Open", merged: "Merged", closed: "Closed" };
+
+function prPicker(form) {
+  if (form.ghError) return h("p", { class: "field-error", role: "alert" }, form.ghError);
+  const repoSelect = h("select", { class: "input", id: "gh-repo", onchange: (e) => { form.ghRepo = e.target.value; loadPrs(); } },
+    (form.ghRepos || []).length
+      ? form.ghRepos.map((r) => h("option", { value: r.slug, selected: r.slug === form.ghRepo ? true : null }, `${r.slug}${r.private ? " (private)" : ""}`))
+      : h("option", { value: "" }, "Loading your repositories…"));
+  let list;
+  if (form.prsLoading) list = h("p", { class: "hint check-line" }, h("span", { class: "spin", "aria-hidden": "true" }), "Loading pull requests…");
+  else if (form.prsError) list = h("p", { class: "field-error", role: "alert" }, form.prsError);
+  else if (form.prs && !form.prs.length) {
+    list = h("div", { class: "pr-empty" },
+      h("p", {}, h("strong", {}, form.prState === "open" ? `No open pull requests in ${form.ghRepo}.` : `No pull requests in ${form.ghRepo} yet.`)),
+      h("p", { class: "hint" }, "To review work that isn't in a pull request, use Review a branch. Or open a pull request on GitHub first."),
+      h("div", { class: "actions" },
+        form.prState === "open" ? h("button", { class: "btn", type: "button", onclick: () => { form.prState = "all"; loadPrs(); } }, "Show closed and merged") : null,
+        h("button", { class: "btn", type: "button", onclick: () => { form.kind = "review-local"; form.error = null; renderNewScan(); } }, "Review a branch instead"),
+        h("a", { class: "btn btn-quiet", href: `https://github.com/${form.ghRepo}/compare`, target: "_blank", rel: "noreferrer" }, "Open a pull request on GitHub")));
+  } else if (form.prs) {
+    list = h("div", { class: "pr-list", role: "radiogroup", "aria-label": "Pull requests" },
+      form.prs.map((pr) => h("button", {
+        type: "button", role: "radio", class: "pr-row", "aria-checked": String(form.prNumber === pr.number),
+        onclick: () => { form.prNumber = pr.number; form.prLink = ""; renderNewScan(); },
+      },
+        h("span", { class: "pr-num" }, `#${pr.number}`),
+        h("span", { class: "pr-main" }, h("strong", {}, pr.title),
+          h("span", { class: "hint" }, `${pr.head} into ${pr.base}, by ${pr.author}, updated ${when(pr.updated_at)}`)),
+        h("span", { class: `pr-state is-${pr.draft ? "draft" : pr.state}` }, pr.draft ? "Draft" : PR_STATE[pr.state] || pr.state))));
+  }
+  return [
+    h("div", { class: "field" }, h("label", { class: "field-label", for: "gh-repo" }, "Repository on GitHub"), repoSelect),
+    h("label", { class: "check" }, h("input", { type: "checkbox", checked: form.prState === "all",
+      onchange: (e) => { form.prState = e.target.checked ? "all" : "open"; loadPrs(); } }),
+      h("span", {}, "Include closed and merged pull requests")),
+    h("div", { class: "field" }, h("span", { class: "field-label" }, "Pull request"), list || null),
+    h("details", { class: "fold", open: form.prLink ? true : null }, h("summary", {}, "Or paste a pull request link"),
+      h("input", { class: "input", id: "pr-link", type: "text", value: form.prLink, placeholder: "https://github.com/owner/repo/pull/123",
+        oninput: (e) => { form.prLink = e.target.value.trim(); form.prNumber = null; updateSubmit(); } })),
+  ];
+}
+
+function prTarget(form) {
+  if (form.prLink) return form.prLink;
+  return form.ghRepo && form.prNumber ? `${form.ghRepo}#${form.prNumber}` : "";
+}
+
+let updateSubmit = () => {};
+
 async function renderNewScan() {
   const pane = document.getElementById("detail");
   if (!state.form) {
-    state.form = { kind: "scan", path: "", budget: { scan: 5, "review-local": 2, review: 2 }, post: false, target: "", recent: [] };
-    try {
-      state.form.recent = await api("/api/repos");
-    } catch {
-      state.form.recent = [];
-    }
-    if (state.form.recent.length) {
-      state.form.path = state.form.recent[0];
-      loadRepoInfo(state.form.path);
-      return;
+    state.form = newForm();
+    const [recent, setup] = await Promise.all([api("/api/repos").catch(() => []), api("/api/setup").catch(() => ({}))]);
+    state.form.recent = recent;
+    state.form.picker = Boolean(setup.folder_picker);
+    if (recent.length) {
+      state.form.path = recent[0];
+      return checkFolder(recent[0]);
     }
   }
+  if (parseHash().page !== "new") return;
   const form = state.form;
   const info = form.info;
   const needsRepo = form.kind !== "review";
-  const set = (patch) => { Object.assign(form, patch); renderNewScan(); };
   const kinds = [["scan", "Scan a repository"], ["review-local", "Review a branch"], ["review", "Review a GitHub pull request"]];
 
+  const pathInput = h("input", { class: "input", id: "repo-path", type: "text", list: "recent-repos", value: form.path,
+    placeholder: "/Users/you/code/my-app", autocomplete: "off", spellcheck: "false",
+    oninput: (e) => { form.path = e.target.value; },
+    onkeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); checkFolder(e.target.value); } } });
+  let status = null;
+  if (form.picking) status = h("p", { class: "hint check-line" }, h("span", { class: "spin", "aria-hidden": "true" }), "Waiting for you to choose a folder in the window that opened…");
+  else if (form.checking) status = h("p", { class: "hint check-line" }, h("span", { class: "spin", "aria-hidden": "true" }), "Reading the repository…");
+  else if (form.infoError) status = h("p", { class: "field-error", role: "alert" }, form.infoError);
+  else if (info) {
+    const usable = info.projects.filter((p) => p.enabled).length;
+    status = h("p", { class: `check-ok${Date.now() - form.checkedAt < 700 ? " is-new" : ""}`, role: "status" },
+      h("span", { class: "check-mark", "aria-hidden": "true" }, "✓"),
+      h("span", {}, h("strong", {}, info.name), ` on ${info.current_branch}${info.has_uncommitted ? ", with uncommitted changes" : ""}. `,
+        `${usable} of ${plural(info.projects.length, "project")} can be scanned${info.configured ? "" : ", detected automatically"}.`));
+  }
   const repoField = h("div", { class: "field" },
     h("label", { class: "field-label", for: "repo-path" }, "Repository folder"),
     h("div", { class: "field-row" },
-      h("input", { class: "input", id: "repo-path", type: "text", list: "recent-repos", value: form.path, placeholder: "/Users/you/code/my-app",
-        onchange: (e) => { form.path = e.target.value.trim(); if (form.path) loadRepoInfo(form.path); } }),
-      h("button", { class: "btn", type: "button", onclick: () => form.path && loadRepoInfo(form.path) }, "Check folder")),
+      pathInput,
+      form.picker ? h("button", { class: "btn", type: "button", disabled: form.picking || null, onclick: chooseFolder }, "Choose folder…") : null,
+      h("button", { class: "btn", type: "button", disabled: form.checking || null, onclick: () => checkFolder(pathInput.value) }, "Check folder")),
     h("datalist", { id: "recent-repos" }, (form.recent || []).map((p) => h("option", { value: p }))),
-    form.checking ? h("p", { class: "hint" }, "Reading the repository…") : null,
-    form.infoError ? h("p", { class: "field-error", role: "alert" }, form.infoError) : null,
-    info ? h("p", { class: "hint" }, `${info.name} on ${info.current_branch}${info.has_uncommitted ? ", with uncommitted changes" : ""}${info.configured ? "." : ". No .pr-review.toml, so projects were detected automatically."}`) : null);
+    status);
 
   const budget = h("div", { class: "field field-narrow" },
-    h("label", { class: "field-label", for: "budget" }, "Spending limit"),
+    h("label", { class: "field-label", for: "budget" }, "Usage limit"),
     h("div", { class: "money-input" }, h("span", { "aria-hidden": "true" }, "$"),
       h("input", { class: "input", id: "budget", type: "number", min: "0.3", max: "100", step: "0.5", value: form.budget[form.kind],
         oninput: (e) => { form.budget[form.kind] = e.target.value; } })),
-    h("p", { class: "hint" }, form.kind === "scan" ? "The riskiest code is reviewed first, and the scan stops at this amount." : "The review stops at this amount."));
+    h("p", { class: "hint" }, form.kind === "scan"
+      ? "Measured at API prices. With a Claude login this comes out of your plan's usage, not your card. The riskiest code is reviewed first, and the scan stops at this amount."
+      : "Measured at API prices. The review stops at this amount."));
 
   let fields = [];
   if (form.kind === "scan" && info) {
@@ -836,41 +983,57 @@ async function renderNewScan() {
       h("fieldset", { class: "field" }, h("legend", { class: "field-label" }, "Projects to scan"),
         info.projects.map((p) => h("label", { class: `check${p.enabled ? "" : " is-disabled"}` },
           h("input", { type: "checkbox", checked: form.projects.includes(p.name), disabled: !p.enabled,
-            onchange: (e) => { form.projects = e.target.checked ? [...form.projects, p.name] : form.projects.filter((x) => x !== p.name); } }),
+            onchange: (e) => { form.projects = e.target.checked ? [...form.projects, p.name] : form.projects.filter((x) => x !== p.name); updateSubmit(); } }),
           h("span", {}, h("strong", {}, p.name), `${p.path === "." ? " at the repository root" : p.path !== p.name ? ` in ${p.path}` : ""}, ${p.language}`,
             p.note ? h("span", { class: "hint" }, `, ${p.note}`) : null)))),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: form.uncommitted, onchange: (e) => { form.uncommitted = e.target.checked; } }),
         h("span", {}, "Include uncommitted changes", h("span", { class: "hint" }, ". Git-ignored files such as .env are never included."))),
     ];
   } else if (form.kind === "review-local" && info) {
-    const branchSelect = (id, value, onPick) => h("select", { class: "input", id, onchange: (e) => onPick(e.target.value) },
+    const branchSelect = (id, value, onPick) => h("select", { class: "input", id, onchange: (e) => { onPick(e.target.value); updateSubmit(); } },
       info.branches.map((b) => h("option", { value: b, selected: b === value ? true : null }, b)));
-    fields = [
-      h("div", { class: "field-pair" },
-        h("div", { class: "field" }, h("label", { class: "field-label", for: "base" }, "Compare against"), branchSelect("base", form.base, (b) => { form.base = b; })),
-        h("div", { class: "field" }, h("label", { class: "field-label", for: "head" }, "Branch to review"), branchSelect("head", form.head, (b) => { form.head = b; }))),
-      h("p", { class: "hint" }, "Only committed changes are reviewed. Commit your work to the branch first."),
-    ];
+    fields = info.branches.length < 2
+      ? [h("p", { class: "hint" }, `${info.name} has only one branch, so there's nothing to compare. Create a branch for your change, or scan the repository instead.`)]
+      : [
+          h("div", { class: "field-pair" },
+            h("div", { class: "field" }, h("label", { class: "field-label", for: "base" }, "Compare against"), branchSelect("base", form.base, (b) => { form.base = b; })),
+            h("div", { class: "field" }, h("label", { class: "field-label", for: "head" }, "Branch to review"), branchSelect("head", form.head, (b) => { form.head = b; }))),
+          h("p", { class: "hint" }, "Only committed changes are reviewed. Commit your work to the branch first."),
+        ];
   } else if (form.kind === "review") {
     fields = [
-      h("div", { class: "field" }, h("label", { class: "field-label", for: "pr" }, "Pull request"),
-        h("input", { class: "input", id: "pr", type: "text", value: form.target, placeholder: "owner/repo#123 or a GitHub link",
-          oninput: (e) => { form.target = e.target.value; submitBtn.disabled = !/#\d+$|\/pull\/\d+/.test(form.target.trim()); } })),
+      ...prPicker(form),
       h("label", { class: "check" }, h("input", { type: "checkbox", checked: form.post, onchange: (e) => { form.post = e.target.checked; renderNewScan(); } }),
         h("span", {}, "Post the review on the pull request", h("span", { class: "hint" }, ". Leave this off to only see it here."))),
     ];
   }
 
-  const ready = form.kind === "review" ? /#\d+$|\/pull\/\d+/.test(form.target.trim()) : Boolean(info);
-  const submit = async () => {
+  const readyReason = () => {
+    if (form.kind === "review") return prTarget(form) ? null : "Choose a pull request above.";
+    if (!info) return "Check a repository folder first.";
+    if (form.kind === "scan" && !form.projects.length) return "Choose at least one project.";
+    if (form.kind === "review-local" && (info.branches.length < 2 || form.base === form.head)) return "Choose two different branches.";
+    return null;
+  };
+  const submitBtn = h("button", { class: "btn btn-primary btn-large", type: "button" }, form.kind === "scan" ? "Start scan" : "Start review");
+  const submitHint = h("span", { class: "hint" });
+  updateSubmit = () => {
+    const why = readyReason();
+    submitBtn.disabled = Boolean(why) || form.busy;
+    const selected = (form.prs || []).find((pr) => pr.number === form.prNumber);
+    submitHint.textContent = why
+      || (form.kind === "review" && form.post ? `The review will be posted on GitHub when it finishes${selected && selected.state !== "open" ? ". This pull request is already " + selected.state : ""}.`
+        : "Nothing is posted or changed in your repository.");
+  };
+  submitBtn.addEventListener("click", async () => {
     form.error = null;
     const body = { kind: form.kind, budget_usd: Number(form.budget[form.kind]) };
     if (form.kind === "scan") Object.assign(body, { repo_path: form.path, projects: form.projects, uncommitted: form.uncommitted });
     if (form.kind === "review-local") Object.assign(body, { repo_path: form.path, base: form.base, head: form.head });
-    if (form.kind === "review") Object.assign(body, { target: form.target.trim(), post: form.post });
+    if (form.kind === "review") Object.assign(body, { target: prTarget(form), post: form.post });
     try {
       form.busy = true;
-      renderNewScan();
+      updateSubmit();
       const job = await api("/api/jobs", { body });
       form.busy = false;
       state.jobs = [job, ...state.jobs.filter((j) => j.id !== job.id)];
@@ -881,23 +1044,25 @@ async function renderNewScan() {
       form.error = e.message;
       renderNewScan();
     }
-  };
-  const submitBtn = h("button", { class: "btn btn-primary btn-large", type: "button", disabled: !ready || form.busy, onclick: submit },
-    form.kind === "scan" ? "Start scan" : "Start review");
+  });
+  updateSubmit();
 
-  pane.replaceChildren(h("article", { class: "page" },
-    h("a", { class: "back", href: "#" }, "All runs"),
+  pane.replaceChildren(h("article", { class: pageClass() },
+    h("a", { class: "back", href: "#/" }, "Overview"),
     h("h1", { class: "page-title" }, "New scan"),
     h("p", { class: "page-lead" }, "Runs in the background on this computer. You can keep browsing while it works."),
-    segmented("What to do", kinds, form.kind, (kind) => set({ kind, error: null }), "kind-seg"),
+    segmented("What to do", kinds, form.kind, (kind) => {
+      form.kind = kind;
+      form.error = null;
+      if (kind === "review") loadGithub();
+      else renderNewScan();
+    }, "kind-seg"),
     h("div", { class: "form" },
       needsRepo ? repoField : null,
       fields,
       needsRepo && !info ? null : budget,
       form.error ? h("p", { class: "field-error", role: "alert" }, form.error) : null,
-      h("div", { class: "actions" },
-        submitBtn,
-        h("span", { class: "hint" }, form.kind === "review" && form.post ? "The review will be posted on GitHub when it finishes." : "Nothing is posted or changed in your repository.")))));
+      h("div", { class: "actions" }, submitBtn, submitHint))));
 }
 
 // ---------- overview (home) ----------
@@ -922,7 +1087,7 @@ async function renderOverview() {
   };
   const t = ov.totals;
 
-  pane.replaceChildren(h("article", { class: "page overview" },
+  pane.replaceChildren(h("article", { class: pageClass("overview") },
     h("section", { class: "hero ov-hero" },
       h("div", {},
         h("h1", { class: "hero-title ov-title" }, "Every bug here comes with proof."),
@@ -1076,7 +1241,7 @@ async function renderJob(jobId) {
   let shownFindings = 0;
 
   const progressSection = h("section", { class: "section live-progress" });
-  pane.replaceChildren(h("article", { class: "page live" },
+  pane.replaceChildren(h("article", { class: pageClass("live") },
     h("a", { class: "back", href: "#/" }, "Overview"),
     h("h1", { class: "page-title" }, job.title),
     statusLine,
@@ -1214,7 +1379,7 @@ async function renderGuide() {
 
   const steps = [
     ["Start a scan", [
-      h("p", {}, "Click ", h("a", { href: "#/new" }, "New scan"), ", pick a repository folder, choose the projects and a spending limit, then Start scan. Progress appears live; open the results when it finishes. The same page reviews a branch or a GitHub pull request."),
+      h("p", {}, "Click ", h("a", { href: "#/new" }, "New scan"), ", pick a repository folder (Choose folder… opens the Finder picker), choose the projects and a usage limit, then Start scan. Progress appears live; open the results when it finishes. The same page reviews a branch, or a pull request picked from your GitHub repositories."),
       h("p", {}, "From a terminal it's the same thing:"), cmd("pr-review scan ~/code/my-app --project backend --uncommitted --max-budget-usd 5")]],
     ["Read a finding", [
       h("p", {}, "Pick a bug in the middle column. The trail at the top shows how it was proven, in order: the test passes before the change, fails with it, passes with the fix, and the existing tests still pass. Red means failing, green means passing."),
@@ -1240,7 +1405,7 @@ async function renderGuide() {
       h("p", {}, "Each review is also saved as a workflow artifact. Download it and open it here with pr-review ui --runs-dir <folder>.")]],
   ];
 
-  pane.replaceChildren(h("article", { class: "page guide" },
+  pane.replaceChildren(h("article", { class: pageClass("guide") },
     h("a", { class: "back", href: "#" }, "All runs"),
     h("h1", { class: "page-title" }, state.runs.length ? "Guide" : "Get started"),
     h("p", { class: "page-lead" }, "pr-review finds bugs, proves each one with a test it runs itself, and checks every fix before showing it to you."),

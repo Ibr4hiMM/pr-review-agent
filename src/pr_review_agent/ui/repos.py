@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from ..adapters import adapter_for
 from ..config import CONFIG_FILE, load_repo_config
@@ -15,7 +19,35 @@ class RepoError(ValueError):
     """A problem the person can fix; the message is shown in the dashboard as is."""
 
 
+def clean_path(raw: str) -> str:
+    """Accept what people paste: quoted paths from Terminal, file:// URLs, trailing slashes."""
+    text = (raw or "").strip().strip("'\"").strip()
+    if text.startswith("file://"):
+        text = unquote(urlparse(text).path)
+    text = text.replace("\\ ", " ")  # shell-escaped spaces
+    return text.rstrip("/") or text
+
+
+def pick_folder() -> str | None:
+    """Show the macOS folder picker. Returns the chosen path, or None if the person cancelled."""
+    if sys.platform != "darwin" or not shutil.which("osascript"):
+        raise RepoError("The folder picker only works on macOS. Type or paste the path instead.")
+    proc = subprocess.run(
+        ["osascript", "-e", "activate", "-e", 'POSIX path of (choose folder with prompt "Choose a repository")'],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None  # cancelled
+    return clean_path(proc.stdout) or None
+
+
 def repo_root(path: str) -> Path:
+    path = clean_path(path)
+    if not path:
+        raise RepoError("Choose or type the folder of a repository first.")
     p = Path(path).expanduser()
     if not p.is_dir():
         raise RepoError(f"{path} doesn't exist or isn't a folder.")

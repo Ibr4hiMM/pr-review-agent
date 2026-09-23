@@ -290,3 +290,89 @@ def test_overview_totals_and_story(server):
     assert call(server, "/api/overview")[2]["totals"]["open"] == 0
     for asset in ("/landing.js", "/landing.css", "/tokens.css"):
         assert call(server, asset, token=False)[0] == 200
+
+
+def test_pasted_paths_are_cleaned_up():
+    from pr_review_agent.ui.repos import clean_path
+
+    assert clean_path("'/Users/me/My Repo'") == "/Users/me/My Repo"
+    assert clean_path("file:///Users/me/My%20Repo/") == "/Users/me/My Repo"
+    assert clean_path("/Users/me/My\\ Repo/") == "/Users/me/My Repo"
+    assert clean_path('  "~/code/app"  ') == "~/code/app"
+
+
+def test_folder_picker_endpoint(server, monkeypatch):
+    import subprocess
+    import sys
+
+    import pr_review_agent.ui.repos as repos
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(repos.shutil, "which", lambda name: "/usr/bin/osascript")
+    picked = subprocess.CompletedProcess([], 0, stdout=f"{server['repo']}/\n", stderr="")
+    monkeypatch.setattr(repos.subprocess, "run", lambda *a, **k: picked)
+    status, _, body = call(server, "/api/pick-folder", {})
+    assert status == 200 and body["path"] == str(server["repo"])
+    cancelled = subprocess.CompletedProcess([], 1, stdout="", stderr="User canceled. (-128)")
+    monkeypatch.setattr(repos.subprocess, "run", lambda *a, **k: cancelled)
+    assert call(server, "/api/pick-folder", {})[2] == {"path": None}
+    monkeypatch.setattr(sys, "platform", "linux")
+    status, _, body = call(server, "/api/pick-folder", {})
+    assert status == 400 and "only works on macOS" in body["error"]
+
+
+def test_pull_request_listing(server, monkeypatch):
+    import httpx
+    import respx
+
+    import pr_review_agent.ui.github as gh
+
+    monkeypatch.setattr(gh, "github_token", lambda: "t")
+    pr = {
+        "id": 1,
+        "node_id": "x",
+        "number": 2,
+        "title": "merge changes",
+        "state": "closed",
+        "locked": False,
+        "draft": False,
+        "merged_at": "2026-05-06T08:25:56Z",
+        "updated_at": "2026-05-06T08:25:56Z",
+        "user": {
+            "login": "me",
+            "id": 1,
+            "node_id": "u",
+            "avatar_url": "",
+            "gravatar_id": "",
+            "url": "",
+            "html_url": "",
+            "followers_url": "",
+            "following_url": "",
+            "gists_url": "",
+            "starred_url": "",
+            "subscriptions_url": "",
+            "organizations_url": "",
+            "repos_url": "",
+            "events_url": "",
+            "received_events_url": "",
+            "type": "User",
+            "site_admin": False,
+        },
+        "head": {"ref": "dev", "sha": "a", "label": "me:dev", "repo": None, "user": None},
+        "base": {"ref": "main", "sha": "b", "label": "me:main", "repo": None, "user": None},
+        "html_url": "https://github.com/me/app/pull/2",
+    }
+    with respx.mock(assert_all_called=False) as mock:
+        mock.get("https://api.github.com/repos/me/app/pulls").mock(return_value=httpx.Response(200, json=[pr]))
+        mock.get("https://api.github.com/repos/me/nope/pulls").mock(
+            return_value=httpx.Response(404, json={"message": "Not Found"})
+        )
+        mock.route(host="127.0.0.1").pass_through()
+        status, _, body = call(server, "/api/github/prs?repo=me/app&state=all")
+        assert status == 200 and body[0]["number"] == 2 and body[0]["state"] == "merged" and body[0]["head"] == "dev"
+        status, _, body = call(server, "/api/github/prs?repo=me/nope")
+        assert status == 400 and "Can't find me/nope" in body["error"]
+    status, _, body = call(server, "/api/github/prs?repo=not%20a%20slug")
+    assert status == 400 and "owner/name" in body["error"]
+    monkeypatch.setattr(gh, "github_token", lambda: None)
+    assert "gh auth login" in call(server, "/api/github/prs?repo=me/app")[2]["error"]

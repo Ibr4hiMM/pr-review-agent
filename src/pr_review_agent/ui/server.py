@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import sys
 import webbrowser
 from functools import partial
 from http import HTTPStatus
@@ -28,8 +29,9 @@ from urllib.parse import parse_qs, urlparse
 from ..config import Settings, github_token
 from ..runs import RUN_ID_RE, RunRecord, list_runs, load_run
 from ..workspace import repo_slug
+from . import github as gh_lookup
 from .jobs import JobManager
-from .repos import RepoError, apply_fix, fix_state, repo_info, repo_root, undo_fix
+from .repos import RepoError, apply_fix, fix_state, pick_folder, repo_info, repo_root, undo_fix
 from .store import Store
 
 STATIC = {
@@ -198,6 +200,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._json(self._setup())
         elif path == "/api/overview":
             self._json(self._overview())
+        elif path == "/api/github/repos":
+            try:
+                self._json(gh_lookup.list_repos())
+            except RepoError as e:
+                self._error(HTTPStatus.BAD_REQUEST, str(e))
+        elif path == "/api/github/prs":
+            try:
+                self._json(gh_lookup.list_prs((query.get("repo") or [""])[0], (query.get("state") or ["open"])[0]))
+            except RepoError as e:
+                self._error(HTTPStatus.BAD_REQUEST, str(e))
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -266,6 +278,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "docker_note": docker_note,
             "runs_dir": str(self.app.runs_dir),
             "model": self.app.settings.model,
+            "folder_picker": sys.platform == "darwin",
         }
 
     # ---------- POST ----------
@@ -291,6 +304,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 fp = self._fingerprint(record, data)
                 entry = self.app.store.set_triage(record.repo, fp, str(data.get("status", "")), data.get("note"))
                 self._json(entry)
+            elif path == "/api/pick-folder":
+                self._json({"path": pick_folder()})
             elif path in ("/api/fix/check", "/api/fix/apply", "/api/fix/undo"):
                 self._fix(path.rsplit("/", 1)[1], data)
             else:

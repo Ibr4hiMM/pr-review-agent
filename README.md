@@ -5,7 +5,7 @@ An AI code reviewer built on the **Claude Agent SDK** that only reports bugs it 
 **Website:** https://ibr4himm.github.io/pr-review-agent/
 
 - **`review`** a GitHub pull request (and optionally post the review), or **`review-local`** a branch.
-- **`scan`** a whole repository, highest-risk code first, within a spending cap.
+- **`scan`** a whole repository, highest-risk code first, within a usage limit.
 - **Fix** what it finds: every proven bug comes with a patch that's only called *verified* once the failing test
   passes with it and nothing else breaks.
 - **`ui`**: a local dashboard to start scans and reviews, read each bug's proof, preview the code before and
@@ -121,11 +121,11 @@ one. The **Guide** page in the sidebar walks through everything below.
   tests run, bugs proven and fixes verified, and a map of the codebase lighting up chunk by chunk, riskiest
   first. Bugs appear the moment a test proves them.
 
-- **Start scans and reviews.** Click **New scan**, pick a repository folder (its projects and branches are
-  detected), then scan it, review a branch against another, or review a GitHub pull request. Set a spending
-  limit, and choose whether to include uncommitted work and whether to post the review on GitHub. The job
-  runs in the background with a live progress log and a **Cancel** button; **Open results** appears when
-  it's done.
+- **Start scans and reviews.** Click **New scan** and pick a repository folder: **Choose folder…** opens the
+  macOS folder picker, or paste a path. Its projects and branches are detected. Then scan it, review one
+  branch against another, or review a pull request picked from your GitHub repositories (open, or closed and
+  merged). Set a usage limit, and choose whether to include uncommitted work and whether to post the review
+  on GitHub. The job runs in the background; **Open results** appears when it's done.
 - **Read the proof.** Each bug's **verification trail** shows, in order: the test passes before the change,
   fails with it, passes with the fix, and the existing tests still pass. Below it are the explanation, the
   evidence (the agent's test and its real output, quoted code) and the fix. Suspicions that didn't survive
