@@ -29,6 +29,8 @@ class ReviewContext:
     suites: dict[str, SuiteResult] = field(default_factory=dict)
     diff: PrDiff | None = None
     progress: Callable[[str], None] = lambda _msg: None
+    # Structured progress for the dashboard's live view (see ui/jobs.py for the event shapes).
+    emit: Callable[[dict], None] = lambda _event: None
     # Head contents of files the findings point at, kept for the dashboard's code viewer (the
     # checkout is deleted when the run ends).
     sources: dict[str, str] = field(default_factory=dict)

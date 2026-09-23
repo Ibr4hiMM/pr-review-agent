@@ -10,18 +10,22 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="/tokens.css">
   <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/landing.css">
+  <script src="/landing.js" defer></script>
   <script src="/app.js" defer></script>
 </head>
 <body>
   <div class="app" id="app" data-view="list">
     <nav class="pane runs-pane" aria-label="Runs">
-      <header class="brand">
+      <a class="brand" href="#/">
         <span class="mark" aria-hidden="true"></span>
         <span class="brand-name">pr-review</span>
-      </header>
+      </a>
       <div class="side-actions">
         <a class="btn btn-primary btn-block" href="#/new">New scan</a>
+        <a class="side-link" href="#/">Overview</a>
         <a class="side-link" href="#/guide">Guide</a>
       </div>
       <div id="jobs"></div>

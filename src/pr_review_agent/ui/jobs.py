@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 import time
 import uuid
@@ -38,8 +39,55 @@ class Job:
     finished: float | None = None
     run_id: str | None = None
     error: str | None = None
+    # Live picture of the run for the dashboard, built from the pipeline's events (see apply_event).
+    state: dict[str, Any] = field(
+        default_factory=lambda: {
+            "phase": "queued",
+            "tests": 0,
+            "fix_checks": 0,
+            "spent": 0.0,
+            "reserved": 0.0,
+            "findings": [],
+        }
+    )
     _loop: asyncio.AbstractEventLoop | None = None
     _task: asyncio.Task | None = None
+    _state_lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def apply_event(self, event: dict[str, Any]) -> None:
+        """Fold one pipeline event into `state`. Event types:
+        phase {phase}, plan {budget, chunks:[{label, files, lines}]}, chunk {i, state, proven?},
+        finding {i, title, severity, file, line, tier, fix}, spent {usd, reserved}, test, fix_check."""
+        with self._state_lock:
+            s = self.state
+            kind = event.get("type")
+            if kind == "phase":
+                s["phase"] = event["phase"]
+                for key in ("budget", "files", "proposed"):
+                    if key in event:
+                        s[key] = event[key]
+            elif kind == "plan":
+                s["budget"] = event["budget"]
+                s["chunks"] = [{**c, "state": "queued", "proven": 0} for c in event["chunks"]]
+            elif kind == "chunk" and 0 <= event.get("i", -1) < len(s.get("chunks", [])):
+                chunk = s["chunks"][event["i"]]
+                chunk["state"] = event["state"]
+                if "proven" in event:
+                    chunk["proven"] = event["proven"]
+            elif kind == "finding":
+                s["findings"].append(
+                    {k: event.get(k) for k in ("i", "title", "severity", "file", "line", "tier", "fix")}
+                )
+            elif kind == "spent":
+                s["spent"], s["reserved"] = event["usd"], event.get("reserved", 0.0)
+            elif kind == "test":
+                s["tests"] += 1
+            elif kind == "fix_check":
+                s["fix_checks"] += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._state_lock:
+            return copy.deepcopy(self.state)
 
     def to_dict(self, since: int = 0) -> dict[str, Any]:
         elapsed = None
@@ -57,6 +105,7 @@ class Job:
             "error": self.error,
             "log": self.log[since:],
             "log_len": len(self.log),
+            "state": self.snapshot(),
         }
 
 
@@ -125,16 +174,27 @@ async def execute(job: Job, settings: Settings, progress: Callable[[str], None])
     if note:
         progress(note)
     p = job.params
+    emit = job.apply_event
     if job.kind == "scan":
         _res, record = await actions.scan(
-            Path(p["repo_path"]), s, sandbox, progress, p["projects"] or None, p["budget_usd"], None, p["uncommitted"]
+            Path(p["repo_path"]),
+            s,
+            sandbox,
+            progress,
+            p["projects"] or None,
+            p["budget_usd"],
+            None,
+            p["uncommitted"],
+            emit=emit,
         )
     elif job.kind == "review-local":
         s.review_budget_usd = p["budget_usd"]
-        _res, record = await actions.review_local(Path(p["repo_path"]), p["base"], p["head"], s, sandbox, progress)
+        _res, record = await actions.review_local(
+            Path(p["repo_path"]), p["base"], p["head"], s, sandbox, progress, emit=emit
+        )
     else:
         s.review_budget_usd = p["budget_usd"]
-        _res, record = await actions.review_pr(p["target"], s, sandbox, progress, p["post"])
+        _res, record = await actions.review_pr(p["target"], s, sandbox, progress, p["post"], emit=emit)
     summary = record.summary()
     progress(
         f"Done: {summary['verified']} proven, {summary['possible']} possible, {summary['fixes']} verified "
@@ -192,9 +252,18 @@ class JobManager:
     def list(self) -> list[dict[str, Any]]:
         with self._lock:
             jobs = sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
-        return [
-            {k: v for k, v in j.to_dict().items() if k != "log"} | {"last": j.log[-1] if j.log else ""} for j in jobs
-        ]
+        out = []
+        for j in jobs:
+            d = {k: v for k, v in j.to_dict().items() if k not in ("log", "state")}
+            snap = j.snapshot()
+            d["last"] = j.log[-1] if j.log else ""
+            d["phase"] = snap.get("phase")
+            d["proven"] = sum(1 for f in snap.get("findings", []) if f.get("tier") == "verified")
+            chunks = snap.get("chunks") or []
+            d["chunks_done"] = sum(c["state"] in ("done", "cached", "failed") for c in chunks)
+            d["chunks_total"] = len(chunks)
+            out.append(d)
+        return out
 
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)

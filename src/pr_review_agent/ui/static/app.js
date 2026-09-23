@@ -165,37 +165,50 @@ function go(runId, fp) {
   location.hash = `#/r/${encodeURIComponent(runId)}${fp ? `/f/${fp}` : ""}`;
 }
 
+const anims = []; // live animations on the current page, stopped when leaving it
+function stopAnims() {
+  while (anims.length) anims.pop().destroy();
+}
+
 async function route() {
   const r = parseHash();
   const app = document.getElementById("app");
-  const narrow = window.matchMedia("(max-width: 860px)").matches;
   stopJobPolling();
+  stopAnims();
   renderSidebar();
-  if (r.page === "new" || r.page === "guide" || r.page === "job" || (r.page === "home" && !state.runs.length)) {
+  if (r.page !== "run") {
     app.dataset.mode = "page";
     app.dataset.view = "detail";
     if (r.page === "new") return renderNewScan();
     if (r.page === "job") return renderJob(r.jobId);
-    return renderGuide();
+    if (r.page === "guide") return renderGuide();
+    return renderOverview();
   }
   app.dataset.mode = "run";
-  const id = r.page === "run" ? r.runId : state.runs[0].id;
-  if (!state.run || state.run.id !== id) {
+  const prevRun = state.run && state.run.id;
+  const prevFp = state.fp;
+  if (!state.run || state.run.id !== r.runId) {
     try {
-      state.run = await api(`/api/runs/${encodeURIComponent(id)}`);
+      state.run = await api(`/api/runs/${encodeURIComponent(r.runId)}`);
     } catch {
       state.run = null;
     }
   }
-  state.fp = r.page === "run" ? r.fp : null;
+  state.fp = r.fp;
+  const narrow = window.matchMedia("(max-width: 860px)").matches;
   if (!state.fp && state.run && !narrow) {
     const first = visibleFindings()[0];
     if (first) state.fp = first.fingerprint;
   }
-  app.dataset.view = r.fp ? "detail" : r.page === "run" || !narrow ? "list" : "runs";
-  renderSidebar();
-  renderList();
-  renderDetail(Boolean(r.fp));
+  app.dataset.view = r.fp ? "detail" : "list";
+  const paint = () => {
+    renderSidebar();
+    renderList();
+    renderDetail(Boolean(r.fp));
+  };
+  const switching = prevRun === r.runId && prevFp && state.fp && prevFp !== state.fp;
+  if (switching && document.startViewTransition && !window.PRLanding.reduced()) document.startViewTransition(paint);
+  else paint();
 }
 
 // ---------- sidebar: jobs + runs ----------
@@ -293,20 +306,22 @@ function renderList() {
   const open = run.findings.filter((v) => triageOf(v.fingerprint).status === "open").length;
   const f = state.filters;
   const setFilter = (patch) => { Object.assign(f, patch); savePref("pr-review-filters", f); renderList(); };
-  const rows = h("div", { role: "list" });
+  const fresh = renderList.lastRun !== run.id; // first paint of this run: count up and stagger in
+  renderList.lastRun = run.id;
+  const rows = h("div", { role: "list", class: `rows${fresh ? " is-entering" : ""}` });
 
   pane.replaceChildren(
     h("header", { class: "run-head" },
-      h("button", { class: "back", type: "button", onclick: () => { location.hash = ""; document.getElementById("app").dataset.view = "runs"; } }, "All runs"),
+      h("a", { class: "back", href: "#/" }, "Overview"),
       h("h1", { class: "run-title" }, run.repo),
       h("p", { class: "run-meta" }, run.target),
       h("p", { class: "run-meta" }, runMeta(run)),
       run.url ? h("p", { class: "run-meta" }, h("a", { href: run.url, target: "_blank", rel: "noreferrer" }, "Open the pull request on GitHub")) : null,
       h("div", { class: "tally" },
-        h("div", { class: "is-verified" }, h("strong", {}, verified), h("span", {}, "proven by a test")),
-        h("div", {}, h("strong", {}, run.findings.length - verified), h("span", {}, "possible")),
-        h("div", { class: "is-fixed" }, h("strong", {}, fixes), h("span", {}, fixes === 1 ? "verified fix" : "verified fixes")),
-        h("div", {}, h("strong", {}, open), h("span", {}, "still open")))),
+        h("div", { class: "is-verified" }, tallyNum(verified, fresh), h("span", {}, "proven by a test")),
+        h("div", {}, tallyNum(run.findings.length - verified, fresh), h("span", {}, "possible")),
+        h("div", { class: "is-fixed" }, tallyNum(fixes, fresh), h("span", {}, fixes === 1 ? "verified fix" : "verified fixes")),
+        h("div", {}, tallyNum(open, fresh), h("span", {}, "still open")))),
     h("div", { class: "filters", role: "group", "aria-label": "Filter findings" },
       SEVERITIES.map((s) => h("button", { class: "chip", type: "button", "aria-pressed": String(f.sev.includes(s)),
         onclick: () => setFilter({ sev: f.sev.includes(s) ? f.sev.filter((x) => x !== s) : [...f.sev, s] }) }, SEV_LABEL[s])),
@@ -326,6 +341,12 @@ function renderList() {
         : null),
   );
   renderRows(rows);
+}
+
+function tallyNum(value, animate) {
+  const node = h("strong", {}, animate ? 0 : value);
+  if (animate) requestAnimationFrame(() => window.PRLanding.countUp(node, value, { duration: 700 }));
+  return node;
 }
 
 function renderRows(container) {
@@ -879,7 +900,86 @@ async function renderNewScan() {
         h("span", { class: "hint" }, form.kind === "review" && form.post ? "The review will be posted on GitHub when it finishes." : "Nothing is posted or changed in your repository.")))));
 }
 
-// ---------- job page ----------
+// ---------- overview (home) ----------
+
+async function renderOverview() {
+  const L = window.PRLanding;
+  const pane = document.getElementById("detail");
+  let ov = { totals: { runs: 0, proven: 0, possible: 0, fixes: 0, open: 0, usage_usd: 0 }, recent: [], story: null };
+  try {
+    ov = await api("/api/overview");
+  } catch {
+    /* show the page with the example below */
+  }
+  if (parseHash().page !== "home") return;
+  const active = state.jobs.filter((j) => j.status === "running" || j.status === "queued");
+  const proofHost = h("div", { class: "ov-proof" });
+  const pipeHost = h("div", {});
+  const stat = (value, label, cls, opts) => {
+    const num = h("strong", { class: "ov-num" }, 0);
+    requestAnimationFrame(() => L.countUp(num, value, opts));
+    return h("div", { class: `ov-stat ${cls || ""}` }, num, h("span", {}, label));
+  };
+  const t = ov.totals;
+
+  pane.replaceChildren(h("article", { class: "page overview" },
+    h("section", { class: "hero ov-hero" },
+      h("div", {},
+        h("h1", { class: "hero-title ov-title" }, "Every bug here comes with proof."),
+        h("p", { class: "hero-lead" }, "Scan a repository or review a change. pr-review writes a failing test for each bug it suspects, re-runs it in a sandbox, and checks every fix against your own tests."),
+        h("div", { class: "hero-actions" },
+          h("a", { class: "btn btn-primary", href: "#/new" }, t.runs ? "New scan" : "Start your first scan"),
+          h("a", { class: "btn", href: "#/guide" }, "Guide"))),
+      active.length
+        ? h("a", { class: "ov-live", href: `#/jobs/${active[0].id}` },
+            h("span", { class: "pulse", "aria-hidden": "true" }),
+            h("span", {}, h("strong", {}, active[0].title),
+              h("span", { class: "hint" }, active[0].chunks_total
+                ? `, ${active[0].chunks_done} of ${active[0].chunks_total} chunks reviewed, ${plural(active[0].proven, "bug")} proven so far`
+                : `, ${jobStatusText(active[0]).toLowerCase()}`)),
+            h("span", { class: "ov-live-go" }, "Watch"))
+        : null,
+      proofHost),
+    t.runs ? h("section", { class: "section ov-stats-wrap" },
+      h("h2", { class: "section-title" }, "Across your runs"),
+      h("div", { class: "ov-stats" },
+        stat(t.proven, t.proven === 1 ? "bug proven by a test" : "bugs proven by a test", "is-red"),
+        stat(t.fixes, t.fixes === 1 ? "fix verified" : "fixes verified", "is-green"),
+        stat(t.open, "still open"),
+        stat(t.runs, t.runs === 1 ? "run" : "runs"),
+        stat(t.usage_usd, "usage, at API prices", "", { prefix: "$", decimals: 2 }))) : null,
+    h("section", { class: "section" },
+      h("h2", { class: "section-title" }, "How a finding is made"),
+      h("p", { class: "section-sub" }, "Suspicions are cheap. Only the ones a test can prove reach you."),
+      pipeHost),
+    ov.recent.length ? h("section", { class: "section" },
+      h("h2", { class: "section-title" }, "Recent runs"),
+      h("ol", { class: "ov-runs" }, ov.recent.map((run) => h("li", {},
+        h("a", { href: `#/r/${encodeURIComponent(run.id)}` },
+          h("span", { class: "ov-run-main" }, h("strong", {}, run.repo), h("span", { class: "hint" }, run.target)),
+          h("span", { class: "ov-run-meta" },
+            h("span", {},
+              run.verified + run.possible ? h("span", { class: "hit" }, plural(run.verified + run.possible, "bug")) : "No bugs",
+              run.fixes ? `, ${plural(run.fixes, "verified fix", "verified fixes")}` : ""),
+            h("span", { class: "hint" }, `${KIND_LABEL[run.kind] || run.kind}, ${when(run.created_at)}`))))))) : null));
+
+  let story;
+  let caption;
+  if (ov.story) {
+    story = L.storyFromFinding(ov.story.finding, ov.story.source);
+    const r = ov.story.run;
+    caption = h("span", {}, `From your ${(KIND_LABEL[r.kind] || r.kind).toLowerCase()} of ${r.repo}, ${when(r.created_at)}. `,
+      h("a", { href: `#/r/${encodeURIComponent(r.id)}/f/${ov.story.finding.fingerprint}` }, "Open it"));
+  } else {
+    story = L.storyFromFinding(L.DEMO.finding, L.DEMO.source);
+    caption = "An example from a small test repository. Your own verified fixes appear here after your first scan.";
+  }
+  anims.push(L.mountProof(proofHost, story, { caption: "" }));
+  proofHost.querySelector(".proof-caption span")?.replaceWith(caption instanceof Node ? caption : h("span", {}, caption));
+  anims.push(L.mountPipeline(pipeHost));
+}
+
+// ---------- job page: live view ----------
 
 let jobPoll = null;
 function stopJobPolling() {
@@ -887,45 +987,195 @@ function stopJobPolling() {
   jobPoll = null;
 }
 
+const PHASES = [
+  ["prepare", "Preparing a copy of the repository"],
+  ["analyze", "Running checks and tests"],
+  ["agent", "Claude is investigating"],
+  ["verify", "Verifying what it found"],
+  ["done", "Finished"],
+];
+const SCAN_PHASE = {
+  queued: "Waiting to start",
+  prepare: "Installing dependencies, running tests and checks",
+  review: "Reviewing the riskiest code first",
+  done: "Finished",
+};
+const CHUNK_STATE = {
+  queued: "Waiting",
+  reviewing: "Reviewing",
+  done: "Reviewed",
+  cached: "Reviewed before",
+  failed: "Didn't finish",
+  skipped: "Not reached",
+};
+
+// The pipeline's log lines, in words a person would use. null = a duplicate of the next line.
+const ACTIVITY = [
+  [/^Read (.+)/, (m) => `Reading ${m[1]}`],
+  [/^Grep (.+)/, (m) => `Searching the code for “${m[1]}”`],
+  [/^Glob (.+)/, (m) => `Listing files matching ${m[1]}`],
+  [/^find_references (.+)/, (m) => `Looking for everything that uses ${m[1]}`],
+  [/^static_findings/, () => "Checking the compiler and linter results"],
+  [/^(run_repro_test|check_fix|run_existing_tests)\b/, () => null],
+  [/^running repro test in (.+)/, (m) => `Running a test it wrote, in ${m[1]}`],
+  [/^checking fix in \S+ \((.+)\)/, (m) => `Trying a fix to ${m[1]}`],
+  [/^running (\d+) existing test file\(s\) in (.+)/, (m) => `Running ${m[1]} of your test files in ${m[2]}`],
+  [/^\[\d+\/\d+\] [^:]+: (.+)/, (m) => `Reviewing ${m[1]}`],
+  [/^preparing (.+?) \(/, (m) => `Installing ${m[1]} and running its tests and checks`],
+  [/^(\d+) chunk\(s\) planned/, (m) => `Split the code into ${m[1]} chunks, riskiest first`],
+  [/^analyzing (.+?) \(/, (m) => `Running checks and tests for ${m[1]}`],
+  [/^agent reviewing/, () => "Claude is reading the change"],
+  [/^verifying (\d+) proposed/, (m) => `Verifying ${m[1]} suspected ${m[1] === "1" ? "bug" : "bugs"}`],
+];
+
+function activityText(line) {
+  const text = line.replace(/^\[\s*[\d.]+s\]\s*/, "");
+  for (const [re, say] of ACTIVITY) {
+    const m = text.match(re);
+    if (m) return say(m);
+  }
+  return text;
+}
+
 async function renderJob(jobId) {
+  const L = window.PRLanding;
   const pane = document.getElementById("detail");
-  const logLines = [];
   let job;
   try {
     job = await api(`/api/jobs/${jobId}`);
   } catch {
     pane.replaceChildren(h("div", { class: "empty" }, h("h2", {}, "This job isn't running here"),
-      h("p", {}, "Jobs are kept only while the dashboard is open. Finished runs are in the list on the left.")));
+      h("p", {}, "Jobs are kept only while the dashboard is open. Finished runs are listed on the left.")));
     return;
   }
-  logLines.push(...job.log);
-  const logCode = h("code", {});
-  const pre = h("pre", { tabindex: "0", "aria-live": "polite", "aria-label": "Progress" }, logCode);
+  const logLines = [...job.log];
   const statusLine = h("p", { class: "job-status" });
   const actions = h("div", { class: "actions" });
-
-  const paint = () => {
-    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-    fill(logCode, h("span", { class: "plain" }, logLines.join("\n") || "Waiting to start…"));
-    if (stick) pre.scrollTop = pre.scrollHeight;
-    statusLine.className = `job-status job-${job.status}`;
-    fill(statusLine, job.status === "running" ? h("span", { class: "pulse", "aria-hidden": "true" }) : null, jobStatusText(job), job.error ? `: ${job.error}` : "");
-    fill(actions, 
-      job.status === "running" || job.status === "queued"
-        ? h("button", { class: "btn", type: "button", onclick: async () => {
-            try { job = await api(`/api/jobs/${job.id}/cancel`, { body: {} }); paint(); } catch (e) { toast(e.message); }
-          } }, "Cancel")
-        : null,
-      job.status === "done" && job.run_id ? h("a", { class: "btn btn-primary", href: `#/r/${encodeURIComponent(job.run_id)}` }, "Open results") : null,
-      job.status !== "running" && job.status !== "queued" ? h("a", { class: "btn", href: "#/new" }, "Start another") : null);
+  const meterFill = h("span", { class: "meter-spent" });
+  const meterReserved = h("span", { class: "meter-reserved" });
+  const meterText = h("span", { class: "meter-text" });
+  const meter = h("div", { class: "meter" },
+    h("div", { class: "meter-bar", role: "img", "aria-label": "Usage so far" }, meterFill, meterReserved), meterText);
+  const counters = {};
+  const counter = (key, label, cls) => {
+    counters[key] = h("strong", {}, 0);
+    return h("div", { class: `live-count ${cls || ""}` }, counters[key], h("span", {}, label));
   };
+  const counterRow = h("div", { class: "live-counts" },
+    counter("chunks", "chunks reviewed"), counter("tests", "tests run"),
+    counter("proven", "bugs proven", "is-red"), counter("fixes", "fixes verified", "is-green"));
+  const chunkMap = h("ol", { class: "chunk-map", "aria-label": "Chunks of the codebase, riskiest first" });
+  const phaseList = h("ol", { class: "phases" }, PHASES.map(([key, label]) => h("li", { "data-phase": key }, h("span", { class: "phase-dot", "aria-hidden": "true" }), label)));
+  const feed = h("ol", { class: "live-feed" });
+  const feedEmpty = h("p", { class: "hint" }, "Nothing proven yet. Bugs appear here the moment a test proves them.");
+  const feedTitle = h("h2", { class: "section-title" }, "Found so far");
+  const activity = h("ol", { class: "activity" });
+  const logCode = h("code", {});
+  const pre = h("pre", { tabindex: "0", "aria-label": "Full log" }, logCode);
+  const chunkTiles = [];
+  let shownFindings = 0;
 
-  pane.replaceChildren(h("article", { class: "page" },
-    h("a", { class: "back", href: "#" }, "All runs"),
+  const progressSection = h("section", { class: "section live-progress" });
+  pane.replaceChildren(h("article", { class: "page live" },
+    h("a", { class: "back", href: "#/" }, "Overview"),
     h("h1", { class: "page-title" }, job.title),
     statusLine,
     actions,
-    h("div", { class: "codeblock job-log" }, h("div", { class: "codeblock-head" }, h("span", {}, "Progress")), pre)));
+    meter,
+    counterRow,
+    progressSection,
+    h("section", { class: "section" }, feedTitle, feedEmpty, feed),
+    h("section", { class: "section" }, h("h2", { class: "section-title" }, "What it's doing"), activity,
+      h("details", { class: "fold" }, h("summary", {}, "Full log"), h("div", { class: "codeblock job-log" }, pre)))));
+
+  const paint = () => {
+    const st = job.state || {};
+    const active = job.status === "running" || job.status === "queued";
+    // status + actions
+    statusLine.className = `job-status job-${job.status}`;
+    const phaseText = st.chunks ? SCAN_PHASE[st.phase] : (PHASES.find(([k]) => k === st.phase) || [])[1];
+    fill(statusLine, active ? h("span", { class: "pulse", "aria-hidden": "true" }) : null,
+      active ? `${phaseText || "Working"}, ${duration(job.elapsed_s)}` : jobStatusText(job), job.error ? `: ${job.error}` : "");
+    fill(actions,
+      active ? h("button", { class: "btn", type: "button", onclick: async () => {
+        try { job = await api(`/api/jobs/${job.id}/cancel`, { body: {} }); paint(); } catch (e) { toast(e.message); }
+      } }, "Cancel") : null,
+      job.status === "done" && job.run_id ? h("a", { class: "btn btn-primary", href: `#/r/${encodeURIComponent(job.run_id)}` }, "Open results") : null,
+      !active ? h("a", { class: "btn", href: "#/new" }, "Start another") : null);
+    // usage meter
+    const budget = st.budget || job.params.budget_usd || 0;
+    meter.hidden = !budget;
+    if (budget) {
+      const spent = Math.min(st.spent || 0, budget);
+      const reserved = Math.min(st.reserved || 0, budget - spent);
+      meterFill.style.width = `${(spent / budget) * 100}%`;
+      meterReserved.style.width = `${(reserved / budget) * 100}%`;
+      meterText.textContent = `${money(st.spent)} of your ${money(budget)} limit used${reserved > 0.01 ? `, up to ${money(reserved)} more in progress` : ""}`;
+    }
+    // counters
+    const chunks = st.chunks || [];
+    const proven = (st.findings || []).filter((f) => f.tier === "verified").length;
+    const fixes = (st.findings || []).filter((f) => f.fix === "verified").length;
+    counters.chunks.parentElement.hidden = !chunks.length;
+    const reviewed = chunks.filter((c) => ["done", "cached", "failed"].includes(c.state)).length;
+    L.countUp(counters.chunks, reviewed);
+    counters.chunks.nextSibling.textContent = `of ${chunks.length} chunks reviewed`;
+    L.countUp(counters.tests, st.tests || 0);
+    L.countUp(counters.proven, proven);
+    L.countUp(counters.fixes, fixes);
+    // chunk map (scans) or phase steps (reviews)
+    if (chunks.length) {
+      if (!chunkTiles.length) {
+        progressSection.replaceChildren(h("h2", { class: "section-title" }, "The codebase, riskiest first"),
+          h("p", { class: "section-sub" }, "Each tile is one piece of code the agent reviews on its own."), chunkMap);
+        chunks.forEach((c, i) => {
+          const tile = h("li", { class: "tile", title: c.files.join("\n") },
+            h("span", { class: "tile-name" }, c.label), h("span", { class: "tile-state" }), h("span", { class: "tile-bugs" }));
+          chunkTiles[i] = tile;
+          chunkMap.append(tile);
+        });
+      }
+      chunks.forEach((c, i) => {
+        const tile = chunkTiles[i];
+        if (!tile) return;
+        tile.dataset.state = c.state;
+        tile.querySelector(".tile-state").textContent = CHUNK_STATE[c.state] || c.state;
+        tile.querySelector(".tile-bugs").textContent = c.proven ? plural(c.proven, "bug") : "";
+      });
+    } else if (!progressSection.firstChild || progressSection.firstChild !== phaseList) {
+      progressSection.replaceChildren(phaseList);
+    }
+    if (!chunks.length) {
+      const idx = PHASES.findIndex(([k]) => k === st.phase);
+      [...phaseList.children].forEach((li, i) => {
+        li.dataset.state = i < idx || st.phase === "done" ? "done" : i === idx && active ? "active" : "waiting";
+      });
+    }
+    // findings feed: new ones slide in
+    const found = st.findings || [];
+    for (const f of found.slice(shownFindings)) {
+      feed.append(h("li", { class: `feed-item sev-${f.severity}` },
+        h("span", { class: "margin-bar", "aria-hidden": "true" }),
+        h("span", {}, h("strong", {}, f.title),
+          h("span", { class: "row-where" }, `${f.file}:${f.line}`),
+          h("span", { class: "row-tags" },
+            h("span", { class: `sev-text-${f.severity}` }, SEV_LABEL[f.severity]),
+            h("span", { class: f.tier === "verified" ? "tag-verified" : "tag-possible" }, f.tier === "verified" ? "Proven" : "Possible"),
+            f.fix === "verified" ? h("span", { class: "tag-fix" }, "Fix verified") : null))));
+    }
+    shownFindings = found.length;
+    feedTitle.textContent = active ? "Found so far" : "What it found";
+    feedEmpty.hidden = found.length > 0;
+    if (!found.length && !active) {
+      feedEmpty.textContent = job.status === "done" ? "No bugs were proven in this run." : "Nothing was proven.";
+    }
+    // activity + full log
+    const recentLines = logLines.map(activityText).filter(Boolean).slice(-5);
+    fill(activity, recentLines.map((l, i) => h("li", { class: i === recentLines.length - 1 && active ? "is-now" : "" }, l)));
+    const stick = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    fill(logCode, h("span", { class: "plain" }, logLines.join("\n") || "Waiting to start…"));
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  };
   paint();
 
   const tick = async () => {

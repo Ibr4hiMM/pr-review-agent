@@ -2,6 +2,8 @@
 
 An AI code reviewer built on the **Claude Agent SDK** that only reports bugs it can back with evidence.
 
+**Website:** https://ibr4himm.github.io/pr-review-agent/
+
 - **`review`** a GitHub pull request (and optionally post the review), or **`review-local`** a branch.
 - **`scan`** a whole repository, highest-risk code first, within a spending cap.
 - **Fix** what it finds: every proven bug comes with a patch that's only called *verified* once the failing test
@@ -112,6 +114,13 @@ pr-review ui
 `pr-review ui` opens a local dashboard at `http://127.0.0.1:8765`. If that port is taken, it uses the next free
 one. The **Guide** page in the sidebar walks through everything below.
 
+- **Overview.** The home screen replays one of your own verified fixes as an animation: the bug is marked,
+  its test fails, the fix goes in, and the checks pass. It also shows totals across your runs, how a finding
+  is made, and your recent runs.
+- **Live scans.** While a scan runs you see a usage meter against your limit, counters for chunks reviewed,
+  tests run, bugs proven and fixes verified, and a map of the codebase lighting up chunk by chunk, riskiest
+  first. Bugs appear the moment a test proves them.
+
 - **Start scans and reviews.** Click **New scan**, pick a repository folder (its projects and branches are
   detected), then scan it, review a branch against another, or review a GitHub pull request. Set a spending
   limit, and choose whether to include uncommitted work and whether to post the review on GitHub. The job
@@ -168,6 +177,13 @@ checks = ["tsc"]                # typescript: tsc, eslint · python: ruff, mypy
 
 Tip: enabling type-aware `@typescript-eslint/no-floating-promises` and `no-misused-promises` in your ESLint
 config gives the agent strong evidence for async bugs.
+
+## Public site
+
+`site/` is the project's landing page. It shares its styles and animations with the dashboard
+(`src/pr_review_agent/ui/static/{tokens.css,landing.css,landing.js}`). `scripts/build-site.sh` assembles it,
+and `.github/workflows/pages.yml` publishes it to GitHub Pages on every push that touches it. Preview it
+locally with `./scripts/build-site.sh && python3 -m http.server -d _site`.
 
 ## Development
 

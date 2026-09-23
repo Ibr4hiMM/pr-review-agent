@@ -237,3 +237,56 @@ def test_job_errors_are_plain_language():
     resp = Response(httpx.Response(404, request=httpx.Request("GET", "https://api.github.com/x")), None)
     assert friendly_error(RequestFailed(resp), job).startswith("GitHub couldn't find me/app#9")
     assert friendly_error(ValueError("plain"), job) == "plain"
+
+
+def test_job_state_is_built_from_pipeline_events():
+    from pr_review_agent.ui.jobs import Job
+
+    job = Job(id="b" * 10, kind="scan", params={"budget_usd": 5}, title="Scan shop")
+    for event in [
+        {"type": "phase", "phase": "prepare"},
+        {
+            "type": "plan",
+            "budget": 5.0,
+            "chunks": [
+                {"label": "routes.ts 1–1200", "files": ["a"], "lines": 1200},
+                {"label": "auth.ts", "files": ["b"], "lines": 80},
+            ],
+        },
+        {"type": "phase", "phase": "review"},
+        {"type": "chunk", "i": 0, "state": "reviewing"},
+        {"type": "spent", "usd": 0.0, "reserved": 2.0},
+        {"type": "test"},
+        {"type": "fix_check"},
+        {
+            "type": "finding",
+            "i": 0,
+            "title": "t",
+            "severity": "high",
+            "file": "a",
+            "line": 3,
+            "tier": "verified",
+            "fix": "verified",
+        },
+        {"type": "chunk", "i": 0, "state": "done", "proven": 1},
+        {"type": "spent", "usd": 1.2, "reserved": 0.0},
+        {"type": "chunk", "i": 1, "state": "skipped"},
+        {"type": "chunk", "i": 9, "state": "done"},  # out of range: ignored
+    ]:
+        job.apply_event(event)
+    st = job.to_dict()["state"]
+    assert st["phase"] == "review" and st["budget"] == 5.0 and st["spent"] == 1.2
+    assert [c["state"] for c in st["chunks"]] == ["done", "skipped"] and st["chunks"][0]["proven"] == 1
+    assert st["tests"] == 1 and st["fix_checks"] == 1 and st["findings"][0]["fix"] == "verified"
+
+
+def test_overview_totals_and_story(server):
+    rec = server["rec"]
+    status, _, ov = call(server, "/api/overview")
+    assert status == 200 and ov["totals"]["runs"] == 1 and ov["totals"]["proven"] == 1 and ov["totals"]["fixes"] == 1
+    assert ov["totals"]["open"] == 1 and ov["recent"][0]["id"] == rec.id
+    assert ov["story"]["finding"]["fingerprint"] == "abcdef123456" and "Math.floor" in ov["story"]["source"]
+    call(server, "/api/triage", {"run_id": rec.id, "fp": "abcdef123456", "status": "fixed"})
+    assert call(server, "/api/overview")[2]["totals"]["open"] == 0
+    for asset in ("/landing.js", "/landing.css", "/tokens.css"):
+        assert call(server, asset, token=False)[0] == 200

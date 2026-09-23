@@ -12,6 +12,11 @@ from .sandbox import Sandbox
 from .scan.runner import ScanOutcome, run_scan
 
 Progress = Callable[[str], None]
+Emit = Callable[[dict], None]  # structured progress for the dashboard's live view
+
+
+def _no_events(_event: dict) -> None:
+    pass
 
 
 async def scan(
@@ -24,9 +29,10 @@ async def scan(
     max_chunks: int | None = None,
     uncommitted: bool = False,
     concurrency: int = 3,
+    emit: Emit = _no_events,
 ) -> tuple[ScanOutcome, RunRecord]:
     res = await run_scan(
-        repo_path, settings, sandbox, progress, projects, budget_usd, max_chunks, uncommitted, concurrency
+        repo_path, settings, sandbox, progress, projects, budget_usd, max_chunks, uncommitted, concurrency, emit
     )
     target = str(repo_path.resolve()) + (f" ({', '.join(projects)})" if projects else "")
     record = new_run(
@@ -55,8 +61,9 @@ async def review_local(
     settings: Settings,
     sandbox: Sandbox,
     progress: Progress,
+    emit: Emit = _no_events,
 ) -> tuple[ReviewOutcome, RunRecord]:
-    res = await run_local_review(repo_path, base, head, settings, sandbox, progress)
+    res = await run_local_review(repo_path, base, head, settings, sandbox, progress, emit)
     record = new_run(
         "review-local",
         res.pr.repo,
@@ -80,8 +87,9 @@ async def review_pr(
     sandbox: Sandbox,
     progress: Progress,
     post: bool = False,
+    emit: Emit = _no_events,
 ) -> tuple[ReviewOutcome, RunRecord]:
-    res = await run_review(target, settings, sandbox, post, progress)
+    res = await run_review(target, settings, sandbox, post, progress, emit)
     pr = res.pr
     record = new_run(
         "review",

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>pr-review: code review that proves every bug</title>
+  <meta name="description" content="pr-review reviews pull requests and codebases with Claude, proves each bug with a failing test it runs itself, and only shows fixes that passed your tests.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231C2541'/%3E%3Cpath d='M12 7H8v18h4' fill='none' stroke='%23FF7A6B' stroke-width='3.5'/%3E%3Cpath d='M16 21l3 3 6-9' fill='none' stroke='%2357C996' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=JetBrains+Mono:wght@400;600&display=swap">
+  <link rel="stylesheet" href="tokens.css">
+  <link rel="stylesheet" href="landing.css">
+  <script src="landing.js" defer></script>
+  <script src="site.js" defer></script>
+</head>
+<body class="site-body">
+  <div class="site">
+    <header class="site-header">
+      <a class="site-brand" href="#top"><span class="mark" aria-hidden="true"></span><span>pr-review</span></a>
+      <nav class="site-nav" aria-label="Page">
+        <a href="#how">How it works</a>
+        <a href="#dashboard">Dashboard</a>
+        <a href="#start">Get started</a>
+        <a href="https://github.com/Ibr4hiMM/pr-review-agent">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="top">
+      <section class="site-hero hero" aria-labelledby="hero-title">
+        <div>
+          <h1 class="hero-title" id="hero-title">Code review that proves every bug it reports.</h1>
+          <p class="hero-lead">pr-review reads your pull requests and code with Claude, writes a failing test for each bug it suspects, and runs it in a sandbox. You only see the bugs it proved, each with a fix that already passed your tests.</p>
+          <div class="hero-actions">
+            <a class="s-btn" href="#start">Get started</a>
+            <a class="s-btn is-quiet" href="https://github.com/Ibr4hiMM/pr-review-agent">View on GitHub</a>
+          </div>
+        </div>
+        <div id="proof">
+          <p class="proof-caption">A bug in <code>canRefund</code> lets every role issue refunds. The agent's test fails on it, and the one-line fix passes the test and the existing suite.</p>
+        </div>
+      </section>
+
+      <section class="site-section" id="how" aria-labelledby="how-title">
+        <h2 class="site-h2" id="how-title">How a finding is made</h2>
+        <p class="site-lead">Suspicions are cheap. pr-review keeps only the ones a test can prove, and drops the rest before you see them.</p>
+        <div id="pipeline">
+          <ol>
+            <li>Your code: a pull request, a branch, or a whole repository.</li>
+            <li>Checks and tests: compiler, linters and your test suite run first.</li>
+            <li>Claude investigates: reads the code and its callers, and writes a test for each suspicion.</li>
+            <li>Sandbox verifies: every test is re-run offline. Suspicions it can't prove are dropped.</li>
+            <li>Proven bugs: each comes with its failing test and a fix that passed your suite.</li>
+          </ol>
+        </div>
+      </section>
+
+      <section class="site-section" id="proof-kinds" aria-labelledby="kinds-title">
+        <h2 class="site-h2" id="kinds-title">What counts as proof</h2>
+        <p class="site-lead">Every piece of evidence is checked by pr-review itself after the agent finishes. Nothing is taken on the model's word.</p>
+        <ul class="proof-kinds">
+          <li><strong>A failing test</strong><span>The agent writes a test for the correct behaviour. pr-review re-runs it: it must fail on your code and, for a pull request, pass before the change.</span></li>
+          <li><strong>A broken existing test</strong><span>A test from your own suite passes on the base branch and fails with the change.</span></li>
+          <li class="is-possible"><strong>A compiler or linter error</strong><span>A new tsc, ESLint, ruff or mypy error on a changed line. Reported as possible, not proven.</span></li>
+          <li class="is-possible"><strong>Quoted code</strong><span>The exact lines that show the bug, confirmed to exist where the agent says. Kept only at high confidence.</span></li>
+        </ul>
+      </section>
+
+      <section class="site-section" id="dashboard" aria-labelledby="dash-title">
+        <h2 class="site-h2" id="dash-title">Your scans in one place</h2>
+        <p class="site-lead">Run <code>pr-review ui</code> for a local dashboard that works with your repositories.</p>
+        <figure class="shot">
+          <img src="dashboard.png" width="1440" height="1100" loading="lazy" alt="The pr-review dashboard: a list of findings, and a proven bug with its verification trail, the code, and a verified fix.">
+          <figcaption>Each bug with its proof, the code around it, and a fix you can apply.</figcaption>
+        </figure>
+        <ul class="can-do">
+          <li><strong>Start scans and reviews</strong><span>Pick a folder, a branch or a pull request, set a usage limit, and watch it work.</span></li>
+          <li><strong>Preview the fix</strong><span>See the whole file as it is and as it would be with the patch applied.</span></li>
+          <li><strong>Apply and triage</strong><span>Apply a verified fix to your working copy, undo it, or mark a bug as a false alarm.</span></li>
+        </ul>
+      </section>
+
+      <section class="site-section" id="safety" aria-labelledby="safety-title">
+        <h2 class="site-h2" id="safety-title">Safe to point at your code</h2>
+        <ul class="safety">
+          <li>Tests run in a sandbox with no network access and none of your secrets.</li>
+          <li>The agent can read code and run tests. It can't write files, run commands, or reach GitHub.</li>
+          <li>It works on a fresh copy of the repository, so git-ignored files such as .env are never there.</li>
+          <li>A pull request can't change how it's reviewed: settings come from the base branch.</li>
+          <li>A fix is written to your repository only when you click Apply, and nothing is committed.</li>
+        </ul>
+      </section>
+
+      <section class="site-section" id="start" aria-labelledby="start-title">
+        <h2 class="site-h2" id="start-title">Get started</h2>
+        <p class="site-lead">You need Python 3.12 or newer, <a href="https://docs.astral.sh/uv/">uv</a>, and a Claude login or an Anthropic API key. TypeScript projects tested with vitest and Python projects tested with pytest are supported.</p>
+        <div class="install">
+          <div class="s-cmd"><code>uv tool install git+https://github.com/Ibr4hiMM/pr-review-agent</code><button class="s-btn is-quiet" type="button" data-copy="uv tool install git+https://github.com/Ibr4hiMM/pr-review-agent">Copy</button></div>
+          <div class="s-cmd"><code>pr-review ui</code><button class="s-btn is-quiet" type="button" data-copy="pr-review ui">Copy</button></div>
+          <div class="s-cmd"><code>pr-review scan ~/code/my-app</code><button class="s-btn is-quiet" type="button" data-copy="pr-review scan ~/code/my-app">Copy</button></div>
+        </div>
+        <p class="site-lead site-note">To review every pull request automatically, run <code>pr-review init</code> in your repository and add an <code>ANTHROPIC_API_KEY</code> secret on GitHub.</p>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>pr-review is open source. Built on the Claude Agent SDK.</span>
+      <a href="https://github.com/Ibr4hiMM/pr-review-agent">github.com/Ibr4hiMM/pr-review-agent</a>
+    </footer>
+  </div>
+</body>
+</html>

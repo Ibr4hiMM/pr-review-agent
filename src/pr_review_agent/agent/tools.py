@@ -71,6 +71,7 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
             if not adapter_for(p).can_run_tests(p):
                 return _text(f"Project {p.name} has no test runner; use code_reference evidence instead.", True)
             ctx.progress(f"running repro test in {p.name}")
+            ctx.emit({"type": "test"})
             head, path = await ctx.runner.run_repro(ctx.ws.head, p, args["test_code"])
             base = None
             if ctx.mode == "review" and ctx.ws.base is not None and broken_test_reason(head) is None and head.failed:
@@ -127,6 +128,7 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
             if outside:
                 return _text(f"A fix must stay inside project {p.name}; these files are not: {outside}", True)
             ctx.progress(f"checking fix in {p.name} ({', '.join(c.file for c in changes)})")
+            ctx.emit({"type": "fix_check"})
             suite = ctx.suites.get(p.name)
             tests = [args["test_code"]] if args.get("test_code") else []
             result = await ctx.runner.check_fix(ctx.ws.head, p, changes, tests, suite.head if suite else None)

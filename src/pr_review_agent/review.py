@@ -147,6 +147,7 @@ async def _review_core(
     sandbox: Sandbox,
     progress: Callable[[str], None],
     out: ReviewOutcome,
+    emit: Callable[[dict], None] = lambda _event: None,
 ) -> tuple[PrDiff, RepoConfig]:
     """Analyze → agent → verify, filling `out`. Shared by GitHub PR reviews and local branch reviews."""
     assert ws.base is not None
@@ -154,14 +155,16 @@ async def _review_core(
     diff = parse_diff(ws.diff()).filtered(lambda p: not cfg.is_ignored(p))
     affected = sorted({p.name: p for f in diff.files if (p := cfg.project_for(f.path))}.values(), key=lambda p: p.name)
     runner = ProjectRunner(sandbox, settings)
-    ctx = ReviewContext(mode="review", ws=ws, cfg=cfg, runner=runner, diff=diff, progress=progress)
+    ctx = ReviewContext(mode="review", ws=ws, cfg=cfg, runner=runner, diff=diff, progress=progress, emit=emit)
     out.sources = ctx.sources
     out.stats.model = settings.model
     if not affected:
         out.notes.append("No changed files belong to an enabled project; nothing to review.")
         return diff, cfg
+    emit({"type": "phase", "phase": "analyze", "files": len(diff.files)})
     await _analyze(ctx, runner, affected, out.notes)
     progress("agent reviewing…")
+    emit({"type": "phase", "phase": "agent", "budget": settings.review_budget_usd})
     run = await run_agent(ctx, build_review_prompt(ctx, pr), settings, settings.review_budget_usd)
     out.stats.cost_usd, out.stats.turns, out.stats.duration_s = run.cost_usd, run.turns, run.duration_s
     if run.error:
@@ -170,16 +173,37 @@ async def _review_core(
     if run.result:
         out.stats.proposed = len(run.result.findings)
         progress(f"verifying {len(run.result.findings)} proposed finding(s)…")
+        emit({"type": "phase", "phase": "verify", "proposed": len(run.result.findings)})
         report = await verify_result(ctx, run.result)
         out.kept, out.dropped = report.kept, report.dropped
     out.kept += regression_findings(ctx, out.kept)
+    emit({"type": "spent", "usd": out.stats.cost_usd, "reserved": 0})
+    for v in out.kept:
+        emit(
+            {
+                "type": "finding",
+                "i": None,
+                "title": v.finding.title,
+                "severity": v.finding.severity,
+                "file": v.finding.file,
+                "line": v.finding.line_start,
+                "tier": v.tier,
+                "fix": v.fix.status if v.fix else None,
+            }
+        )
+    emit({"type": "phase", "phase": "done"})
     out.stats.dropped = len(out.dropped)
     out.notes += dropped_notes(out.dropped)
     return diff, cfg
 
 
 async def run_review(
-    target: str, settings: Settings, sandbox: Sandbox, post: bool, progress: Callable[[str], None]
+    target: str,
+    settings: Settings,
+    sandbox: Sandbox,
+    post: bool,
+    progress: Callable[[str], None],
+    emit: Callable[[dict], None] = lambda _event: None,
 ) -> ReviewOutcome:
     owner, repo, number = parse_target(target)
     token = github_token()
@@ -187,11 +211,12 @@ async def run_review(
     pr = await gh.get_pr(owner, repo, number)
     out = ReviewOutcome(pr=pr)
     progress(f"{pr.label}: {pr.title!r} ({pr.head_sha[:7]} → {pr.base_ref})")
+    emit({"type": "phase", "phase": "prepare"})
     ws = await asyncio.to_thread(
         prepare_pr_workspace, owner, repo, number, pr.head_sha, pr.base_sha, token, settings.cache_dir
     )
     try:
-        diff, cfg = await _review_core(ws, pr, settings, sandbox, progress, out)
+        diff, cfg = await _review_core(ws, pr, settings, sandbox, progress, out, emit)
         existing = await gh.existing_comments(pr) if token else []
         out.inline, inline_fps = plan_inline(out.kept, diff, existing, cfg.thresholds.max_inline_comments)
         out.summary = summary_comment(out.kept, inline_fps, pr.head_sha, out.stats, out.notes)
@@ -215,8 +240,10 @@ async def run_local_review(
     settings: Settings,
     sandbox: Sandbox,
     progress: Callable[[str], None],
+    emit: Callable[[dict], None] = lambda _event: None,
 ) -> ReviewOutcome:
     """Review `base_ref...head_ref` of a local repo as if it were a PR (no GitHub involved)."""
+    emit({"type": "phase", "phase": "prepare"})
     ws = await asyncio.to_thread(prepare_local_pair, repo_path, settings.cache_dir, base_ref, head_ref)
     try:
         subject = git(["log", "-1", "--format=%s", ws.head_sha], cwd=ws.head).strip()
@@ -237,7 +264,7 @@ async def run_local_review(
         )
         out = ReviewOutcome(pr=pr)
         progress(f"{pr.label}: {subject!r}")
-        diff, cfg = await _review_core(ws, pr, settings, sandbox, progress, out)
+        diff, cfg = await _review_core(ws, pr, settings, sandbox, progress, out, emit)
         out.inline, inline_fps = plan_inline(out.kept, diff, [], cfg.thresholds.max_inline_comments)
         out.summary = summary_comment(out.kept, inline_fps, ws.head_sha, out.stats, out.notes)
         return out

@@ -41,6 +41,16 @@ class ScanOutcome:
     sources: dict[str, str] = field(default_factory=dict)
 
 
+def chunk_label(chunk: Chunk) -> str:
+    """Short name for the live view: the main file, its line window, and how many files come with it."""
+    first = chunk.focus[0].rsplit("/", 1)[-1]
+    if first in chunk.ranges or chunk.focus[0] in chunk.ranges:
+        lo, hi = chunk.ranges[chunk.focus[0]]
+        return f"{first} {lo}–{hi}"
+    extra = len(chunk.focus) - 1
+    return f"{first} +{extra}" if extra else first
+
+
 class _Budget:
     """Total spend cap shared by concurrent chunks. A chunk reserves up to its own cap up front; if the
     rest is reserved by chunks still running, it waits for them to settle their real (usually lower) cost."""
@@ -78,7 +88,9 @@ async def run_scan(
     max_chunks: int | None = None,
     include_uncommitted: bool = False,
     concurrency: int = 3,
+    emit: Callable[[dict], None] = lambda _event: None,
 ) -> ScanOutcome:
+    emit({"type": "phase", "phase": "prepare"})
     ws = await asyncio.to_thread(prepare_local_workspace, repo_path, settings.cache_dir, "HEAD", include_uncommitted)
     out = ScanOutcome(repo=repo_slug(repo_path) or repo_path.name, sha=ws.head_sha)
     out.stats.model = settings.model
@@ -91,7 +103,7 @@ async def run_scan(
             out.notes.append("No enabled projects to scan.")
             return out
         runner = ProjectRunner(sandbox, settings)
-        ctx = ReviewContext(mode="scan", ws=ws, cfg=cfg, runner=runner, progress=progress)
+        ctx = ReviewContext(mode="scan", ws=ws, cfg=cfg, runner=runner, progress=progress, emit=emit)
         out.sources = ctx.sources
 
         progress(f"preparing {', '.join(p.name for p in projects)} (install, tests, static checks)…")
@@ -112,6 +124,14 @@ async def run_scan(
             chunks = chunks[:max_chunks]
         out.chunks_total = len(chunks)
         progress(f"{len(chunks)} chunk(s) planned; budget ${budget_usd:.2f}")
+        emit(
+            {
+                "type": "plan",
+                "budget": budget_usd,
+                "chunks": [{"label": chunk_label(c), "files": c.describe_focus(), "lines": c.lines} for c in chunks],
+            }
+        )
+        emit({"type": "phase", "phase": "review"})
 
         cache_dir = settings.cache_dir / "scan-cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -120,8 +140,24 @@ async def run_scan(
         seen_titles: list[str] = []
         stop = asyncio.Event()
 
+        def found(i: int, kept: list[VerifiedFinding]) -> None:
+            for v in kept:
+                emit(
+                    {
+                        "type": "finding",
+                        "i": i,
+                        "title": v.finding.title,
+                        "severity": v.finding.severity,
+                        "file": v.finding.file,
+                        "line": v.finding.line_start,
+                        "tier": v.tier,
+                        "fix": v.fix.status if v.fix else None,
+                    }
+                )
+
         async def do_chunk(i: int, chunk: Chunk) -> None:
             if stop.is_set():
+                emit({"type": "chunk", "i": i, "state": "skipped"})
                 return
             key = chunk.cache_key(ws.head, f"{PROMPT_VERSION}|{settings.model}|{settings.effort}")
             cached = cache_dir / f"{key}.json"
@@ -130,22 +166,29 @@ async def run_scan(
                 out.kept.extend(kept)
                 out.chunks_done += 1
                 out.cached_chunks += 1
+                emit({"type": "chunk", "i": i, "state": "cached", "proven": len(kept)})
+                found(i, kept)
                 return
             async with sem:
                 granted = await budget.reserve(settings.review_budget_usd)
                 if not granted:
                     stop.set()
+                    emit({"type": "chunk", "i": i, "state": "skipped"})
                     return
+                emit({"type": "chunk", "i": i, "state": "reviewing"})
+                emit({"type": "spent", "usd": budget.spent, "reserved": budget.reserved})
                 progress(f"[{i + 1}/{len(chunks)}] {chunk.project}: {', '.join(chunk.describe_focus())}")
                 prompt = build_scan_prompt(ctx, chunk.describe_focus(), chunk.context, seen_titles)
                 run = await run_agent(ctx, prompt, settings, granted)
                 await budget.settle(granted, run.cost_usd)
+                emit({"type": "spent", "usd": budget.spent, "reserved": budget.reserved})
                 out.stats.turns += run.turns
                 out.stats.duration_s += run.duration_s
                 if run.error:
                     out.notes.append(f"chunk {', '.join(chunk.describe_focus())}: {run.error}")
                 out.notes += [f"blocked tool call: {b}" for b in run.blocked_calls]
                 if run.result is None:
+                    emit({"type": "chunk", "i": i, "state": "failed", "error": (run.error or "")[:200]})
                     return
                 in_focus = [f for f in run.result.findings if chunk.covers(f.file.removeprefix("./"), f.line_start)]
                 out.stats.proposed += len(run.result.findings)
@@ -158,11 +201,14 @@ async def run_scan(
                     if not chunk.covers(f.file.removeprefix("./"), f.line_start)
                 )
                 seen_titles.extend(f"{v.finding.file}: {v.finding.title}" for v in report.kept)
+                found(i, report.kept)
+                emit({"type": "chunk", "i": i, "state": "done", "proven": len(report.kept)})
                 if not run.error:  # only cache complete runs
                     cached.write_text(json.dumps([v.model_dump(mode="json") for v in report.kept]))
                 out.chunks_done += 1
 
         await asyncio.gather(*(do_chunk(i, c) for i, c in enumerate(chunks)))
+        emit({"type": "phase", "phase": "done"})
         out.stats.cost_usd = budget.spent
         out.stats.dropped = len(out.dropped)
         out.notes += dropped_notes(out.dropped)

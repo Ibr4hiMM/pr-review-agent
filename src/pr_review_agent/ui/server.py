@@ -35,6 +35,9 @@ from .store import Store
 STATIC = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
+    "/tokens.css": ("tokens.css", "text/css; charset=utf-8"),
+    "/landing.js": ("landing.js", "text/javascript; charset=utf-8"),
+    "/landing.css": ("landing.css", "text/css; charset=utf-8"),
 }
 CSP = (
     "default-src 'self'; script-src 'self'; connect-src 'self'; img-src 'self' data: blob:; "
@@ -193,6 +196,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._error(HTTPStatus.BAD_REQUEST, str(e))
         elif path == "/api/setup":
             self._json(self._setup())
+        elif path == "/api/overview":
+            self._json(self._overview())
         else:
             self._error(HTTPStatus.NOT_FOUND, "not found")
 
@@ -203,6 +208,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if record and record.repo_path and record.repo_path not in paths:
                 paths.append(record.repo_path)
         return [p for p in paths if Path(p).is_dir()][:12]
+
+    def _overview(self) -> dict[str, Any]:
+        """Totals across runs (each bug counted once per repo), recent runs, and one real verified
+        finding with its source for the home screen's animation."""
+        summaries = list_runs(self.app.runs_dir)
+        seen: dict[tuple[str, str], Any] = {}
+        story = None
+        for summary in summaries[:50]:
+            record = self.app.run(summary["id"])
+            if record is None:
+                continue
+            triage = self.app.store.triage_for(record.repo)
+            for v in record.findings:
+                key = (record.repo, v.fingerprint)
+                if key not in seen:
+                    seen[key] = (v, triage.get(v.fingerprint, {}).get("status", "open"))
+                if (
+                    story is None
+                    and v.tier == "verified"
+                    and v.fix
+                    and v.fix.status == "verified"
+                    and v.finding.file in record.sources
+                ):
+                    story = {
+                        "run": {
+                            "id": record.id,
+                            "kind": record.kind,
+                            "repo": record.repo,
+                            "created_at": record.created_at,
+                        },
+                        "finding": v.model_dump(mode="json"),
+                        "source": record.sources[v.finding.file],
+                    }
+        found = [v for v, _ in seen.values()]
+        return {
+            "totals": {
+                "runs": len(summaries),
+                "proven": sum(v.tier == "verified" for v in found),
+                "possible": sum(v.tier == "possible" for v in found),
+                "fixes": sum(1 for v in found if v.fix and v.fix.status == "verified"),
+                "open": sum(1 for _, status in seen.values() if status == "open"),
+                "usage_usd": round(sum(s.get("cost_usd", 0.0) for s in summaries), 2),
+            },
+            "recent": summaries[:6],
+            "story": story,
+        }
 
     def _setup(self) -> dict[str, Any]:
         from ..sandbox import DockerSandbox
