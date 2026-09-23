@@ -35,6 +35,7 @@ class ReviewOutcome:
     stats: Stats = field(default_factory=Stats)
     review_url: str | None = None
     summary_url: str | None = None
+    sources: dict[str, str] = field(default_factory=dict)
 
 
 def plan_inline(
@@ -154,6 +155,7 @@ async def _review_core(
     affected = sorted({p.name: p for f in diff.files if (p := cfg.project_for(f.path))}.values(), key=lambda p: p.name)
     runner = ProjectRunner(sandbox, settings)
     ctx = ReviewContext(mode="review", ws=ws, cfg=cfg, runner=runner, diff=diff, progress=progress)
+    out.sources = ctx.sources
     out.stats.model = settings.model
     if not affected:
         out.notes.append("No changed files belong to an enabled project; nothing to review.")

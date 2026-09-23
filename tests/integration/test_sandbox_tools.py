@@ -131,3 +131,41 @@ async def test_check_fix_on_real_tests(env):
     assert not breaking.ok and "breaks existing tests" in " ".join(breaking.notes)
 
     assert (ws.head / "shop/src/pagination.ts").read_text() == before  # always restored
+
+
+COMBINED = """import { expect, it } from 'vitest';
+import { pageCount } from '../../src/pagination';
+import { canRefund } from '../../src/access';
+
+it('counts the last partial page', () => {
+  expect(pageCount(41, 20)).toBe(3);
+});
+
+it('does not let customers refund', () => {
+  expect(canRefund({ id: 'c', role: 'customer' })).toBe(false);
+});
+"""
+
+
+async def test_fix_judged_per_case_when_one_test_covers_two_bugs(env):
+    from pr_review_agent.fixes import plan_edits
+    from pr_review_agent.models import FixEdit
+
+    settings, ws = env
+    cfg = load_repo_config(ws.base)
+    shop = cfg.project("shop")
+    runner = ProjectRunner(make_sandbox("local", settings.cache_dir), settings)
+    changes = plan_edits(
+        ws.head,
+        cfg,
+        [
+            FixEdit(
+                file="shop/src/pagination.ts",
+                old="return Math.floor(total / pageSize);",
+                new="return Math.ceil(total / pageSize);",
+            )
+        ],
+    )
+    result = await runner.check_fix(ws.head, shop, changes, [COMBINED])
+    assert result.ok, result.notes
+    assert "1 of 2 failing cases" in result.notes[0]

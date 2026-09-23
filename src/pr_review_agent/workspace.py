@@ -19,7 +19,9 @@ class GitError(RuntimeError):
     pass
 
 
-def git(args: list[str], cwd: Path | None = None, token: str | None = None, check: bool = True) -> str:
+def git(
+    args: list[str], cwd: Path | None = None, token: str | None = None, check: bool = True, input: str | None = None
+) -> str:
     cmd = ["git"]
     if token:
         # Same approach as actions/checkout: the token is passed per command, never written to disk.
@@ -28,6 +30,7 @@ def git(args: list[str], cwd: Path | None = None, token: str | None = None, chec
     cmd += ["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null", *args]
     proc = subprocess.run(
         cmd,
+        input=input,
         cwd=cwd,
         capture_output=True,
         text=True,

@@ -34,6 +34,8 @@ class RunRecord(BaseModel):
     url: str | None = None
     chunks_done: int | None = None
     chunks_total: int | None = None
+    repo_path: str | None = None  # local checkout the run came from (scans and branch reviews)
+    sources: dict[str, str] = Field(default_factory=dict)  # file -> content at the reviewed commit
 
     def summary(self) -> dict[str, Any]:
         verified = sum(v.tier == "verified" for v in self.findings)

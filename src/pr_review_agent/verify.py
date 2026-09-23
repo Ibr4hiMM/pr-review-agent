@@ -128,7 +128,11 @@ async def check_proposed_fix(ctx: ReviewContext, f: Finding, valid: list[Evidenc
         status = "verified"
     else:
         status = "unverified"
-    return FixResult(status=status, patch=unified_patch(changes), notes=check.notes)
+    for c in changes:
+        ctx.keep_source(c.file)
+    return FixResult(
+        status=status, patch=unified_patch(changes), notes=check.notes, patched={c.file: c.patched for c in changes}
+    )
 
 
 async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyReport:
@@ -233,6 +237,10 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
             report.dropped.append((f, "duplicate"))
             continue
         seen.add(fp)
+        ctx.keep_source(rel)
+        for ev in valid:
+            if ev.kind in ("code_reference", "static") and ev.file:
+                ctx.keep_source(ev.file)
         fix = None
         if f.fix_edits:
             checked = await check_proposed_fix(ctx, f, valid)

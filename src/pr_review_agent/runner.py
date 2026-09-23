@@ -62,6 +62,30 @@ class _RWLock:
                 self._cond.notify_all()
 
 
+def _compare_repro(before: TestRun, after: TestRun) -> tuple[bool, str]:
+    """Judge a fix by the repro test's cases: at least one case that failed without the fix must pass
+    with it, and no case that passed may start failing. (One test file sometimes covers several bugs,
+    so other failing cases may belong to other findings.)"""
+    broken = broken_test_reason(after)
+    if broken and not after.cases:
+        return False, f"could not run with the fix ({broken})"
+    now = {c.id: c.status for c in after.cases}
+    was_failing = [c.id for c in before.failed]
+    fixed = [t for t in was_failing if now.get(t) == "passed"]
+    newly_failing = [c.id for c in before.passed if now.get(c.id) in ("failed", "error")]
+    if newly_failing:
+        return False, "fails in new places with the fix: " + ", ".join(t.split("::")[-1] for t in newly_failing[:3])
+    if not fixed:
+        why = "; ".join((c.message or c.id).splitlines()[0][:200] for c in after.failed[:2])
+        return False, f"still fails with the fix ({why})"
+    if len(fixed) == len(was_failing):
+        return True, "passes with the fix"
+    return True, (
+        f"passes with the fix for {len(fixed)} of {len(was_failing)} failing cases; the others test "
+        "something else, likely another finding"
+    )
+
+
 @dataclass
 class FixCheck:
     ok: bool
@@ -201,18 +225,19 @@ class ProjectRunner:
                 self._baseline_suite[base_key] = baseline_suite or await self._run_tests(root, p)
             if base_key not in self._baseline_diags:
                 self._baseline_diags[base_key] = (await self._run_checks(root, p))[0]
+            # Each repro test's result without the fix, to compare case by case.
+            before_runs = []
+            for code in repro_tests:
+                repro_key = (str(root), p.name, hashlib.sha256(code.encode()).hexdigest())
+                if repro_key not in self.repro_results:
+                    self.repro_results[repro_key] = await self._run_repro(root, p, code)
+                before_runs.append(self.repro_results[repro_key])
             with applied(root, changes):
-                for i, code in enumerate(repro_tests, 1):
+                for i, (code, before_run) in enumerate(zip(repro_tests, before_runs, strict=True), 1):
                     run = await self._run_repro(root, p, code)
-                    broken = broken_test_reason(run)
-                    if broken or run.failed or not run.passed:
-                        check.ok = False
-                        why = broken or f"{len(run.failed)} failing: " + "; ".join(
-                            (c.message or c.id).splitlines()[0][:200] for c in run.failed[:2]
-                        )
-                        check.notes.append(f"repro test {i} still fails with the fix ({why})")
-                    else:
-                        check.notes.append(f"repro test {i} passes with the fix")
+                    ok, note = _compare_repro(before_run, run)
+                    check.ok &= ok
+                    check.notes.append(f"repro test {i} {note}")
                 if can_test:
                     suite = await self._run_tests(root, p)
                     before = {c.id for c in self._baseline_suite[base_key].failed}

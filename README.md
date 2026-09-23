@@ -6,7 +6,8 @@ An AI code reviewer built on the **Claude Agent SDK** that only reports bugs it 
 - **`scan`** a whole repository, highest-risk code first, within a spending cap.
 - **Fix** what it finds: every proven bug comes with a patch that's only called *verified* once the failing test
   passes with it and nothing else breaks.
-- **`ui`**: a local dashboard of every run, showing each bug's proof, the code and the fix.
+- **`ui`**: a local dashboard to start scans and reviews, read each bug's proof, preview the code before and
+  after the fix, apply fixes to your repo, and triage what's left.
 
 ![The pr-review dashboard showing a proven bug, its verification trail and a verified fix](docs/dashboard.png)
 
@@ -108,40 +109,42 @@ pr-review ui
 
 ## Dashboard
 
-`pr-review ui` opens a local dashboard at `http://127.0.0.1:8765` with every scan and review you've run. Each
-run is saved as a JSON file in `~/.local/share/pr-review-agent/runs/`.
+`pr-review ui` opens a local dashboard at `http://127.0.0.1:8765`. If that port is taken, it uses the next free
+one. The **Guide** page in the sidebar walks through everything below.
 
-- **Runs** on the left. **Findings** in the middle, filterable by severity, "proven only", "has verified fix"
-  or text. Move through them with `j`/`k` or the arrow keys.
-- For each bug, a **verification trail** shows the proof in order: passes before the change, fails with it,
-  passes with the fix, existing tests still pass. Below it are the explanation, the code with the buggy lines
-  marked, the fix as a diff (**Copy patch** / **Download patch**), and the evidence: the agent's test, its real
-  output, quoted code.
-- Suspicions that didn't survive verification are listed under **Dropped by verification**, with the reason.
+- **Start scans and reviews.** Click **New scan**, pick a repository folder (its projects and branches are
+  detected), then scan it, review a branch against another, or review a GitHub pull request. Set a spending
+  limit, and choose whether to include uncommitted work and whether to post the review on GitHub. The job
+  runs in the background with a live progress log and a **Cancel** button; **Open results** appears when
+  it's done.
+- **Read the proof.** Each bug's **verification trail** shows, in order: the test passes before the change,
+  fails with it, passes with the fix, and the existing tests still pass. Below it are the explanation, the
+  evidence (the agent's test and its real output, quoted code) and the fix. Suspicions that didn't survive
+  verification are listed under **Dropped by verification**, with the reason.
+- **Preview the code.**
+  - The **Code** section shows the lines around the bug in red. **Whole file** shows all of it.
+  - **With the fix** shows the file after the patch, with changed lines in green.
+  - Tabs switch between the files a finding touches, and clicking a file name in the evidence opens it at
+    that line.
+  - **Open in VS Code** (or Cursor) jumps to the line in your editor.
+- **Apply a fix.** **Apply to my repo** checks the patch against your working copy, then tells you whether it
+  applies, is already applied, or no longer fits because the code changed. **Apply fix** writes it (nothing is
+  committed) and **Undo fix** takes it out again. **Copy patch** and **Download patch** are there too.
+- **Triage.** Mark each bug **Open**, **Fixed**, **Won't fix** or **False alarm**, and add a note. Filter with
+  **Open only**. Decisions are kept per repository and carry over to later runs. Applying a fix marks the bug
+  Fixed.
 
-The GitHub Action uploads each PR review's run as an artifact. Download it, unzip it, and open it with
-`pr-review ui --runs-dir <folder>`.
+Filter by severity, "proven only", "has verified fix" or text, and move through findings with `j`/`k` or the
+arrow keys. Runs are saved as JSON in `~/.local/share/pr-review-agent/runs/`. The GitHub Action uploads each PR
+review's run as an artifact: download it, unzip it, and open it with `pr-review ui --runs-dir <folder>`.
 
-The server only listens on 127.0.0.1, rejects requests for other host names (DNS-rebinding protection), is
-read-only, and serves a strict Content-Security-Policy. All code and agent text is rendered as text, never HTML.
-
-Common options: `--sandbox auto|docker|local` (`auto` uses Docker when it's available), `--model` (default
-`claude-opus-5`) and `-v` for debug logs. Environment overrides: `PR_REVIEW_MODEL`, `PR_REVIEW_EFFORT` (default
-`high`), `PR_REVIEW_REVIEW_BUDGET_USD` (per review / per scan chunk, default 2), `PR_REVIEW_MAX_TURNS`.
-
-**Scan mode** ranks files by risk:
-- sensitive paths (auth, routes, uploads, SQL, payments)
-- git churn over the last 6 months
-- lack of tests
-- bug-relevant diagnostics
-- size
-
-Each chunk is a file plus the local modules it imports. Files over 1,200 lines are split into overlapping
-windows. Chunks run three at a time under the total budget, and results are cached by content, so a re-run
-only pays for code that changed.
-
-**PR reviews** post inline comments only on lines the PR changed, capped at 10 and never repeated on later
-pushes. Everything else goes in one sticky summary comment that's updated in place.
+**Safety.** The dashboard can start paid jobs and write to your repositories, so:
+- The server only listens on 127.0.0.1 and rejects requests for other host names (DNS rebinding).
+- Every API call must carry a random token that's created when the server starts and embedded only in the
+  page itself, so other websites can't read it or trigger anything.
+- Actions must be same-origin JSON POSTs.
+- A fix is written only after an explicit check and click. Fixes that failed their checks can't be applied.
+- Everything from the repository or the agent is rendered as text, under a strict Content-Security-Policy.
 
 ## Configuration: `.pr-review.toml`
 

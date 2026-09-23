@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>pr-review</title>
+  <meta name="pr-review-token" content="__SESSION_TOKEN__">
   <meta name="description" content="Bugs found by pr-review-agent, with the evidence that proves them and the fixes that were checked.">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231C2541'/%3E%3Cpath d='M12 7H8v18h4' fill='none' stroke='%23FF7A6B' stroke-width='3.5'/%3E%3Cpath d='M16 21l3 3 6-9' fill='none' stroke='%2357C996' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -19,6 +20,11 @@
         <span class="mark" aria-hidden="true"></span>
         <span class="brand-name">pr-review</span>
       </header>
+      <div class="side-actions">
+        <a class="btn btn-primary btn-block" href="#/new">New scan</a>
+        <a class="side-link" href="#/guide">Guide</a>
+      </div>
+      <div id="jobs"></div>
       <h2 class="pane-title">Runs</h2>
       <ol class="runs" id="runs"></ol>
     </nav>

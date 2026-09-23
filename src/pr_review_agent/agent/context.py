@@ -15,6 +15,9 @@ from ..models import Diagnostic
 from ..runner import ProjectRunner
 from ..workspace import Workspace
 
+MAX_SOURCE_BYTES = 300_000
+MAX_SOURCES = 60
+
 
 @dataclass
 class ReviewContext:
@@ -26,6 +29,19 @@ class ReviewContext:
     suites: dict[str, SuiteResult] = field(default_factory=dict)
     diff: PrDiff | None = None
     progress: Callable[[str], None] = lambda _msg: None
+    # Head contents of files the findings point at, kept for the dashboard's code viewer (the
+    # checkout is deleted when the run ends).
+    sources: dict[str, str] = field(default_factory=dict)
+
+    def keep_source(self, rel: str) -> None:
+        if rel in self.sources or len(self.sources) >= MAX_SOURCES:
+            return
+        path = self.ws.head / rel
+        try:
+            if path.is_file() and path.stat().st_size <= MAX_SOURCE_BYTES:
+                self.sources[rel] = path.read_text(errors="replace")
+        except OSError:
+            pass
 
     def clean(self, text: str, max_lines: int = 20) -> str:
         from ..adapters.base import clean_output

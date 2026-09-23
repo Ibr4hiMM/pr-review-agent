@@ -8,7 +8,7 @@ from ..adapters import adapter_for
 from ..models import Diagnostic
 from .context import ReviewContext
 
-PROMPT_VERSION = "3"
+PROMPT_VERSION = "4"
 
 SYSTEM_PROMPT = """\
 You are a senior engineer reviewing code for real bugs: wrong logic, broken edge cases, error handling \
@@ -20,7 +20,8 @@ How to work:
 - Read the code under review, then inspect the code around it: callers of changed functions \
 (find_references), the types and schemas they rely on, route wiring, configuration and existing tests.
 - Every finding needs evidence. Strongly prefer a failing test: write the smallest test that asserts the \
-correct behaviour and run it with run_repro_test. A finding backed by a test that the tool reports as \
+correct behaviour and run it with run_repro_test. Write a separate test file for each bug. A finding \
+backed by a test that the tool reports as \
 VALID EVIDENCE is by far the most valuable thing you can produce. If a test comes back NOT EVIDENCE, fix \
 it or drop the finding.
 - Only when a bug genuinely cannot be exercised by a unit test (e.g. it needs production infrastructure), \

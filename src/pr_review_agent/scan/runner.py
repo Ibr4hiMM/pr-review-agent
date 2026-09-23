@@ -37,6 +37,7 @@ class ScanOutcome:
     chunks_total: int = 0
     chunks_done: int = 0
     cached_chunks: int = 0
+    sources: dict[str, str] = field(default_factory=dict)
 
 
 class _Budget:
@@ -90,6 +91,7 @@ async def run_scan(
             return out
         runner = ProjectRunner(sandbox, settings)
         ctx = ReviewContext(mode="scan", ws=ws, cfg=cfg, runner=runner, progress=progress)
+        out.sources = ctx.sources
 
         progress(f"preparing {', '.join(p.name for p in projects)} (install, tests, static checks)…")
         diags, errs = await static.collect(runner, ws.head, projects, cfg)

@@ -151,6 +151,7 @@ class FixResult(BaseModel):
     status: FixStatus
     patch: str  # unified diff, `git apply`-able from the repo root
     notes: list[str] = Field(default_factory=list)
+    patched: dict[str, str] = Field(default_factory=dict)  # file -> full content with the fix, for the UI
 
 
 class CodeExcerpt(BaseModel):

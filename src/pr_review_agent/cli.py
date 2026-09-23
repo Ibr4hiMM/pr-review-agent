@@ -21,7 +21,7 @@ from .config import (
     load_repo_config,
     render_toml,
 )
-from .sandbox import DockerSandbox, Sandbox, make_sandbox
+from .sandbox import Sandbox, pick_sandbox
 
 app = typer.Typer(
     add_completion=False,
@@ -51,19 +51,12 @@ def _setup(verbose: bool, model: str | None) -> Settings:
 
 
 async def _pick_sandbox(kind: str, settings: Settings) -> Sandbox:
-    if kind == "auto":
-        ok, why = await DockerSandbox({}).available()
-        if ok:
-            kind = "docker"
-        elif os.environ.get("GITHUB_ACTIONS") == "true":
-            raise typer.BadParameter(f"docker is required in CI: {why}")
-        else:
-            typer.secho(f"Docker unavailable ({why}); using the local sandbox.", err=True, fg="yellow")
-            kind = "local"
-    sandbox = make_sandbox(kind, settings.cache_dir)
-    ok, why = await sandbox.available()
-    if not ok:
-        raise typer.BadParameter(why)
+    try:
+        sandbox, note = await pick_sandbox(kind, settings.cache_dir)
+    except RuntimeError as e:
+        raise typer.BadParameter(str(e)) from e
+    if note:
+        typer.secho(note, err=True, fg="yellow")
     return sandbox
 
 
@@ -200,19 +193,19 @@ def scan(
     verbose: VerboseOpt = False,
 ) -> None:
     """Scan a local repo for bugs, highest-risk code first. Writes pr-review-report.md + findings.json."""
+    from . import actions
     from .render import findings_json, scan_report
-    from .scan.runner import run_scan
 
     settings = _setup(verbose, model)
     _require_anthropic_credentials()
 
     async def go():
         sb = await _pick_sandbox(sandbox, settings)
-        return await run_scan(
+        return await actions.scan(
             path, settings, sb, _progress, project, max_budget_usd, max_chunks, uncommitted, concurrency
         )
 
-    res = asyncio.run(go())
+    res, record = asyncio.run(go())
     out.mkdir(parents=True, exist_ok=True)
     report = scan_report(res.repo, res.sha, res.kept, res.stats, res.notes, res.chunks_done, res.chunks_total)
     (out / "pr-review-report.md").write_text(report)
@@ -229,20 +222,7 @@ def scan(
         fix = f"  [fix {v.fix.status}]" if v.fix else ""
         typer.echo(f"  [{v.tier}] {f.severity:<8} {f.file}:{f.line_start}  {f.title}{fix}")
     typer.echo(f"Report: {out / 'pr-review-report.md'}")
-    target = str(path.resolve()) + (f" ({', '.join(project)})" if project else "")
-    _save_run(
-        "scan",
-        res.repo,
-        target,
-        res.sha,
-        settings,
-        res.stats,
-        res.kept,
-        res.dropped,
-        res.notes,
-        chunks_done=res.chunks_done,
-        chunks_total=res.chunks_total,
-    )
+    _saved(record, settings)
 
 
 @app.command()
@@ -256,8 +236,8 @@ def review(
     verbose: VerboseOpt = False,
 ) -> None:
     """Review one pull request. Prints the review; --post publishes it."""
+    from . import actions
     from .render import findings_json
-    from .review import run_review
 
     settings = _setup(verbose, model)
     if budget_usd is not None:
@@ -266,9 +246,9 @@ def review(
 
     async def go():
         sb = await _pick_sandbox(sandbox, settings)
-        return await run_review(target, settings, sb, post, _progress)
+        return await actions.review_pr(target, settings, sb, _progress, post)
 
-    res = asyncio.run(go())
+    res, record = asyncio.run(go())
     if json_out:
         json_out.write_text(findings_json(res.kept))
     typer.echo("\n" + res.summary)
@@ -280,19 +260,7 @@ def review(
         typer.secho(f"posted: {res.review_url or '(no new inline comments)'}; summary: {res.summary_url}", fg="green")
     else:
         typer.secho("dry run: nothing was posted (use --post)", fg="yellow", err=True)
-    pr = res.pr
-    _save_run(
-        "review",
-        f"{pr.owner}/{pr.repo}",
-        pr.label,
-        pr.head_sha,
-        settings,
-        res.stats,
-        res.kept,
-        res.dropped,
-        res.notes,
-        url=pr.url,
-    )
+    _saved(record, settings)
 
 
 @app.command("review-local")
@@ -307,8 +275,8 @@ def review_local(
     verbose: VerboseOpt = False,
 ) -> None:
     """Review a local branch (base...head) like a PR, without GitHub. Nothing is posted."""
+    from . import actions
     from .render import findings_json
-    from .review import run_local_review
 
     settings = _setup(verbose, model)
     if budget_usd is not None:
@@ -317,33 +285,19 @@ def review_local(
 
     async def go():
         sb = await _pick_sandbox(sandbox, settings)
-        return await run_local_review(path, base, head, settings, sb, _progress)
+        return await actions.review_local(path, base, head, settings, sb, _progress)
 
-    res = asyncio.run(go())
+    res, record = asyncio.run(go())
     if json_out:
         json_out.write_text(findings_json(res.kept))
     typer.echo("\n" + res.summary)
     for c in res.inline:
         typer.echo(f"\n--- {c['path']}:{c['line']} ---\n{c['body']}")
-    _save_run(
-        "review-local",
-        res.pr.repo,
-        f"{base}...{head}",
-        res.pr.head_sha,
-        settings,
-        res.stats,
-        res.kept,
-        res.dropped,
-        res.notes,
-    )
+    _saved(record, settings)
 
 
-def _save_run(kind, repo, target, sha, settings, stats, kept, dropped, notes, **extra) -> None:
-    from .runs import new_run, save_run
-
-    record = new_run(kind, repo, target, sha, settings.model, stats, kept, dropped, notes, **extra)
-    path = save_run(record, settings.runs_dir)
-    typer.secho(f"Saved run {record.id} ({path}). Browse it with `pr-review ui`.", fg="green", err=True)
+def _saved(record, settings: Settings) -> None:
+    typer.secho(f"Saved run {record.id}. Browse it with `pr-review ui`.", fg="green", err=True)
 
 
 @app.command()

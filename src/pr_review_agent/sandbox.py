@@ -78,6 +78,15 @@ async def _run(argv: list[str], cwd: Path, env: dict[str, str], timeout: int, on
     timed_out = False
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.CancelledError:
+        # The job was cancelled: don't leave test runs or installs behind.
+        if on_timeout:
+            await asyncio.shield(on_timeout())
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        raise
     except TimeoutError:
         timed_out = True
         if on_timeout:
@@ -183,10 +192,10 @@ class DockerSandbox(Sandbox):
 
     async def available(self) -> tuple[bool, str]:
         if not shutil.which("docker"):
-            return False, "docker CLI not found (install Docker Desktop, or use --sandbox local)"
+            return False, "Docker isn't installed"
         res = await _run(["docker", "info", "--format", "{{.ServerVersion}}"], Path.cwd(), dict(os.environ), 30)
         if not res.ok:
-            return False, "docker daemon not reachable: " + res.tail(300)
+            return False, "Docker is installed but not running (open Docker Desktop)"
         return True, f"docker {res.output.strip()}"
 
     async def exec(self, root, workdir, cmd, *, network, timeout, image=None) -> ExecResult:
@@ -239,6 +248,25 @@ class DockerSandbox(Sandbox):
 
         # Only docker's own config needs our env; nothing is forwarded into the container.
         return await _run(argv, root, dict(os.environ), timeout, on_timeout=kill)
+
+
+async def pick_sandbox(kind: str, cache_dir: Path) -> tuple[Sandbox, str | None]:
+    """`auto` means Docker when it's usable, else the local sandbox (never in CI). Returns a warning, if any."""
+    note = None
+    if kind == "auto":
+        ok, why = await DockerSandbox({}).available()
+        if ok:
+            kind = "docker"
+        elif os.environ.get("GITHUB_ACTIONS") == "true":
+            raise RuntimeError(f"docker is required in CI: {why}")
+        else:
+            note = f"{why}, so tests run in the local sandbox (network and home folder blocked)."
+            kind = "local"
+    sandbox = make_sandbox(kind, cache_dir)
+    ok, why = await sandbox.available()
+    if not ok:
+        raise RuntimeError(why)
+    return sandbox, note
 
 
 def make_sandbox(kind: str, cache_dir: Path) -> Sandbox:
