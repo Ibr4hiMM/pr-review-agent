@@ -226,8 +226,23 @@ def scan(
     )
     for v in res.kept:
         f = v.finding
-        typer.echo(f"  [{v.tier}] {f.severity:<8} {f.file}:{f.line_start}  {f.title}")
+        fix = f"  [fix {v.fix.status}]" if v.fix else ""
+        typer.echo(f"  [{v.tier}] {f.severity:<8} {f.file}:{f.line_start}  {f.title}{fix}")
     typer.echo(f"Report: {out / 'pr-review-report.md'}")
+    target = str(path.resolve()) + (f" ({', '.join(project)})" if project else "")
+    _save_run(
+        "scan",
+        res.repo,
+        target,
+        res.sha,
+        settings,
+        res.stats,
+        res.kept,
+        res.dropped,
+        res.notes,
+        chunks_done=res.chunks_done,
+        chunks_total=res.chunks_total,
+    )
 
 
 @app.command()
@@ -265,6 +280,19 @@ def review(
         typer.secho(f"posted: {res.review_url or '(no new inline comments)'}; summary: {res.summary_url}", fg="green")
     else:
         typer.secho("dry run: nothing was posted (use --post)", fg="yellow", err=True)
+    pr = res.pr
+    _save_run(
+        "review",
+        f"{pr.owner}/{pr.repo}",
+        pr.label,
+        pr.head_sha,
+        settings,
+        res.stats,
+        res.kept,
+        res.dropped,
+        res.notes,
+        url=pr.url,
+    )
 
 
 @app.command("review-local")
@@ -297,6 +325,39 @@ def review_local(
     typer.echo("\n" + res.summary)
     for c in res.inline:
         typer.echo(f"\n--- {c['path']}:{c['line']} ---\n{c['body']}")
+    _save_run(
+        "review-local",
+        res.pr.repo,
+        f"{base}...{head}",
+        res.pr.head_sha,
+        settings,
+        res.stats,
+        res.kept,
+        res.dropped,
+        res.notes,
+    )
+
+
+def _save_run(kind, repo, target, sha, settings, stats, kept, dropped, notes, **extra) -> None:
+    from .runs import new_run, save_run
+
+    record = new_run(kind, repo, target, sha, settings.model, stats, kept, dropped, notes, **extra)
+    path = save_run(record, settings.runs_dir)
+    typer.secho(f"Saved run {record.id} ({path}). Browse it with `pr-review ui`.", fg="green", err=True)
+
+
+@app.command()
+def ui(
+    runs_dir: Annotated[Path | None, typer.Option(help="Folder of run JSON files (default: your run history)")] = None,
+    port: Annotated[int, typer.Option(help="Port on 127.0.0.1")] = 8765,
+    open_browser: Annotated[bool, typer.Option("--open/--no-open", help="Open a browser tab")] = True,
+) -> None:
+    """Open the local dashboard: every scan and review, with each bug's evidence, code and fix."""
+    from .ui.server import serve
+
+    folder = runs_dir or Settings().runs_dir
+    folder.mkdir(parents=True, exist_ok=True)
+    serve(folder, port=port, open_browser=open_browser)
 
 
 if __name__ == "__main__":

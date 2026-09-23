@@ -95,6 +95,13 @@ def finding_body(v: VerifiedFinding, heading_level: int = 0) -> str:
     parts += ["", *[_evidence_md(ev, f.file) for ev in v.evidence]]
     if f.suggested_fix:
         parts += ["", f"**Suggested fix:** {f.suggested_fix}"]
+    if v.fix and v.fix.status != "failed":
+        label = (
+            "✅ Verified fix: the failing test passes with this patch and existing tests still pass"
+            if v.fix.status == "verified"
+            else "🩹 Proposed fix (applies cleanly; not checked by a test)"
+        )
+        parts += ["", f"<details><summary>{label}</summary>\n\n{_fence(v.fix.patch, 'diff')}\n</details>"]
     return "\n".join(parts).strip() + "\n"
 
 

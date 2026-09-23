@@ -57,8 +57,13 @@ class Settings(BaseSettings):
     max_turns: int = 40
     sandbox: Literal["docker", "local"] = "docker"
     cache_dir: Path = Path.home() / ".cache" / "pr-review-agent"
+    data_dir: Path = Path.home() / ".local" / "share" / "pr-review-agent"
     test_timeout_s: int = 300
     install_timeout_s: int = 900
+
+    @property
+    def runs_dir(self) -> Path:
+        return self.data_dir / "runs"
 
     @property
     def anthropic_api_key(self) -> str | None:

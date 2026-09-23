@@ -97,3 +97,14 @@ def test_clean_output_strips_local_paths_and_runner_frames(tmp_path):
     )
     out = clean_output(raw, [tmp_path / "head", tmp_path])
     assert out == "AssertionError: expected 2 to be 3\n    at shop/test/x.test.ts:7:31"
+
+
+def test_verified_fix_is_rendered_but_failed_fix_is_not():
+    from pr_review_agent.models import FixResult
+
+    v = vf()
+    v.fix = FixResult(status="verified", patch="diff --git a/x b/x\n-  floor\n+  ceil\n")
+    assert "Verified fix" in inline_comment(v) and "```diff" in inline_comment(v)
+    v.fix = FixResult(status="failed", patch="diff", notes=["repro test 1 still fails"])
+    body = inline_comment(v)
+    assert "Verified fix" not in body and "Proposed fix" not in body and "```diff" not in body

@@ -7,11 +7,16 @@ import hashlib
 import logging
 import os
 import uuid
+from collections import Counter
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .adapters import adapter_for
-from .adapters.base import REPORT_DIR, CheckSpec, PathMap
+from .adapters.base import REPORT_DIR, CheckSpec, PathMap, broken_test_reason
 from .config import ProjectConfig, Settings
+from .fixes import FileChange, applied
 from .models import Diagnostic, TestRun
 from .sandbox import ExecResult, Sandbox, _run
 
@@ -24,6 +29,46 @@ class InstallError(RuntimeError):
     pass
 
 
+class _RWLock:
+    """Many test runs may share a checkout; a fix check needs it to itself while files are patched."""
+
+    def __init__(self) -> None:
+        self._readers = 0
+        self._writer = False
+        self._cond = asyncio.Condition()
+
+    @asynccontextmanager
+    async def shared(self) -> AsyncIterator[None]:
+        async with self._cond:
+            await self._cond.wait_for(lambda: not self._writer)
+            self._readers += 1
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._readers -= 1
+                self._cond.notify_all()
+
+    @asynccontextmanager
+    async def exclusive(self) -> AsyncIterator[None]:
+        async with self._cond:
+            await self._cond.wait_for(lambda: not self._writer and self._readers == 0)
+            self._writer = True
+        try:
+            yield
+        finally:
+            async with self._cond:
+                self._writer = False
+                self._cond.notify_all()
+
+
+@dataclass
+class FixCheck:
+    ok: bool
+    notes: list[str] = field(default_factory=list)
+    checked_tests: bool = False  # False when there was nothing executable to check against
+
+
 class ProjectRunner:
     def __init__(self, sandbox: Sandbox, settings: Settings, max_parallel: int = 2):
         self.sandbox = sandbox
@@ -32,6 +77,13 @@ class ProjectRunner:
         self._sem = asyncio.Semaphore(max_parallel)
         # (root, project, sha256(test_code)) -> result, so verification can reuse runs we made ourselves.
         self.repro_results: dict[tuple[str, str, str], TestRun] = {}
+        self.fix_results: dict[str, FixCheck] = {}
+        self._locks: dict[str, _RWLock] = {}
+        self._baseline_suite: dict[tuple[str, str], TestRun] = {}
+        self._baseline_diags: dict[tuple[str, str], list[Diagnostic]] = {}
+
+    def _lock(self, root: Path) -> _RWLock:
+        return self._locks.setdefault(str(root), _RWLock())
 
     def _image(self, p: ProjectConfig) -> str:
         return p.image or adapter_for(p).default_image
@@ -69,10 +121,14 @@ class ProjectRunner:
     # --- tests -----------------------------------------------------------------------------------
 
     async def run_tests(self, root: Path, p: ProjectConfig, files: list[str] | None = None) -> TestRun:
-        adapter = adapter_for(p)
-        if not adapter.can_run_tests(p):
+        if not adapter_for(p).can_run_tests(p):
             raise ValueError(f"project {p.name} has no supported test runner configured")
         await self.ensure_installed(root, p)
+        async with self._lock(root).shared():
+            return await self._run_tests(root, p, files)
+
+    async def _run_tests(self, root: Path, p: ProjectConfig, files: list[str] | None = None) -> TestRun:
+        adapter = adapter_for(p)
         report_rel = f"{REPORT_DIR}/tests-{uuid.uuid4().hex[:8]}.out"
         report_path = self._paths(root, p).host_project_dir / report_rel
         async with self._sem:
@@ -83,35 +139,131 @@ class ProjectRunner:
         report_path.unlink(missing_ok=True)
         return adapter.parse_test_report(report, res, self._paths(root, p))
 
-    async def run_repro(self, root: Path, p: ProjectConfig, test_code: str) -> tuple[TestRun, str]:
-        """Write `test_code` into the project's repro dir, run only that file, remove it again.
-        Returns the result and the repo-relative path the test was saved at."""
+    def _repro_path(self, p: ProjectConfig, test_code: str) -> tuple[str, str, str]:
         if len(test_code) > MAX_REPRO_CHARS:
             raise ValueError(f"test is too long ({len(test_code)} chars, max {MAX_REPRO_CHARS})")
         digest = hashlib.sha256(test_code.encode()).hexdigest()
-        adapter = adapter_for(p)
-        rel = adapter.repro_file(p, digest[:10])
-        repo_rel = f"{p.norm_path}/{rel}" if p.norm_path else rel
+        rel = adapter_for(p).repro_file(p, digest[:10])
+        return digest, rel, (f"{p.norm_path}/{rel}" if p.norm_path else rel)
+
+    async def run_repro(self, root: Path, p: ProjectConfig, test_code: str) -> tuple[TestRun, str]:
+        """Write `test_code` into the project's repro dir, run only that file, remove it again.
+        Returns the result and the repo-relative path the test was saved at."""
+        digest, _rel, repo_rel = self._repro_path(p, test_code)
         cache_key = (str(root), p.name, digest)
-        if cache_key in self.repro_results:
-            return self.repro_results[cache_key], repo_rel
+        if cache_key not in self.repro_results:
+            await self.ensure_installed(root, p)
+            async with self._lock(root).shared():
+                self.repro_results[cache_key] = await self._run_repro(root, p, test_code)
+        return self.repro_results[cache_key], repo_rel
+
+    async def _run_repro(self, root: Path, p: ProjectConfig, test_code: str) -> TestRun:
+        _digest, rel, _repo_rel = self._repro_path(p, test_code)
         target = self._paths(root, p).host_project_dir / rel
         created_dir = not target.parent.exists()
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(test_code)
         try:
-            run = await self.run_tests(root, p, files=[rel])
+            return await self._run_tests(root, p, files=[rel])
         finally:
             target.unlink(missing_ok=True)
             if created_dir and target.parent.exists() and not any(target.parent.iterdir()):
                 target.parent.rmdir()
-        self.repro_results[cache_key] = run
-        return run, repo_rel
+
+    # --- fixes -----------------------------------------------------------------------------------
+
+    async def check_fix(
+        self,
+        root: Path,
+        p: ProjectConfig,
+        changes: list[FileChange],
+        repro_tests: list[str],
+        baseline_suite: TestRun | None = None,
+        must_pass: list[str] | None = None,
+    ) -> FixCheck:
+        """Apply `changes`, then require: every repro test passes, no existing test starts failing, and
+        no new static diagnostic appears in the changed files. Files are always restored afterwards."""
+        h = hashlib.sha256(str(root).encode())
+        for c in changes:
+            h.update(c.file.encode() + b"\0" + c.patched.encode() + b"\0")
+        for t in [*repro_tests, *(must_pass or [])]:
+            h.update(t.encode() + b"\0")
+        key = h.hexdigest()
+        if key in self.fix_results:
+            return self.fix_results[key]
+        can_test = adapter_for(p).can_run_tests(p)
+        await self.ensure_installed(root, p)
+        base_key = (str(root), p.name)
+        check = FixCheck(ok=True, checked_tests=can_test and bool(repro_tests or must_pass))
+        async with self._lock(root).exclusive():
+            # Baselines on the unpatched code (computed once per checkout and project).
+            if can_test and base_key not in self._baseline_suite:
+                self._baseline_suite[base_key] = baseline_suite or await self._run_tests(root, p)
+            if base_key not in self._baseline_diags:
+                self._baseline_diags[base_key] = (await self._run_checks(root, p))[0]
+            with applied(root, changes):
+                for i, code in enumerate(repro_tests, 1):
+                    run = await self._run_repro(root, p, code)
+                    broken = broken_test_reason(run)
+                    if broken or run.failed or not run.passed:
+                        check.ok = False
+                        why = broken or f"{len(run.failed)} failing: " + "; ".join(
+                            (c.message or c.id).splitlines()[0][:200] for c in run.failed[:2]
+                        )
+                        check.notes.append(f"repro test {i} still fails with the fix ({why})")
+                    else:
+                        check.notes.append(f"repro test {i} passes with the fix")
+                if can_test:
+                    suite = await self._run_tests(root, p)
+                    before = {c.id for c in self._baseline_suite[base_key].failed}
+                    broke = sorted(c.id for c in suite.failed if c.id not in before)
+                    if suite.load_error or suite.timed_out:
+                        check.ok = False
+                        check.notes.append(f"test suite did not run with the fix: {suite.summary()}")
+                    elif broke:
+                        check.ok = False
+                        check.notes.append("fix breaks existing tests: " + ", ".join(broke[:5]))
+                    else:
+                        check.notes.append(f"existing tests still pass ({len(suite.passed)} passed)")
+                    status = {c.id: c.status for c in suite.cases}
+                    still = [t for t in must_pass or [] if status.get(t) != "passed"]
+                    if still:
+                        check.ok = False
+                        check.notes.append("regressed tests still fail with the fix: " + ", ".join(still[:5]))
+                    elif must_pass:
+                        check.notes.append("the regressed test(s) pass again with the fix")
+                diags, _errors = await self._run_checks(root, p)
+                files = {c.file for c in changes}
+                before_ids = Counter(d.identity() for d in self._baseline_diags[base_key] if d.file in files)
+                new = []
+                for d in diags:
+                    if d.file not in files:
+                        continue
+                    if before_ids[d.identity()] > 0:
+                        before_ids[d.identity()] -= 1
+                    else:
+                        new.append(d)
+                if new:
+                    check.ok = False
+                    check.notes.append(
+                        "fix introduces diagnostics: "
+                        + "; ".join(f"{d.file}:{d.line} {d.tool} {d.rule or ''} {d.message[:120]}" for d in new[:3])
+                    )
+                elif adapter_for(p).checks(p):
+                    check.notes.append("no new static-check diagnostics")
+        self.fix_results[key] = check
+        return check
 
     # --- static checks ---------------------------------------------------------------------------
 
     async def run_checks(self, root: Path, p: ProjectConfig) -> tuple[list[Diagnostic], list[str]]:
         """All configured static checks. Returns (diagnostics, human-readable errors)."""
+        if any(spec.cmd for spec in adapter_for(p).checks(p)):
+            await self.ensure_installed(root, p)
+        async with self._lock(root).shared():
+            return await self._run_checks(root, p)
+
+    async def _run_checks(self, root: Path, p: ProjectConfig) -> tuple[list[Diagnostic], list[str]]:
         diags: list[Diagnostic] = []
         errors: list[str] = []
         for spec in adapter_for(p).checks(p):
@@ -127,7 +279,6 @@ class ProjectRunner:
             env = {"PATH": os.environ.get("PATH", ""), "HOME": str(self.settings.cache_dir)}
             res = await _run(spec.host_argv, paths.host_project_dir, env, 300)
         else:
-            await self.ensure_installed(root, p)
             async with self._sem:
                 res = await self._exec(root, p, spec.cmd or "", network=False, timeout=self.settings.test_timeout_s)
         if res.timed_out:

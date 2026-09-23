@@ -59,6 +59,7 @@ async def test_fixture(name, tmp_path):
         "found": len(hits),
         "false_positives": fps,
         "verified": sum(v.tier == "verified" for v in out.kept),
+        "fixes_verified": sum(1 for v in out.kept if v.fix and v.fix.status == "verified"),
         "dropped": len(out.dropped),
         "cost_usd": round(out.stats.cost_usd, 4),
         "turns": out.stats.turns,
@@ -68,3 +69,4 @@ async def test_fixture(name, tmp_path):
     print(json.dumps(row))
     assert fps == 0, [v.finding.title for v in out.kept]
     assert len(hits) == len(bugs), f"missed {len(bugs) - len(hits)} seeded bug(s)"
+    assert row["fixes_verified"] == len(bugs), "every seeded bug should come with a verified fix"

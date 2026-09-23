@@ -18,7 +18,17 @@ from .adapters import adapter_for
 from .adapters.base import broken_test_reason
 from .agent.context import ReviewContext
 from .agent.tools import failure_excerpt, repro_verdict
-from .models import SEVERITY_ORDER, Evidence, Finding, ReviewResult, VerifiedFinding, fingerprint
+from .fixes import EditError, plan_edits, unified_patch
+from .models import (
+    SEVERITY_ORDER,
+    CodeExcerpt,
+    Evidence,
+    Finding,
+    FixResult,
+    ReviewResult,
+    VerifiedFinding,
+    fingerprint,
+)
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +88,47 @@ async def _check_failing_test(ctx: ReviewContext, f: Finding, ev: Evidence) -> t
         # Replace whatever the agent wrote with output we produced ourselves.
         ev.test_output = failure_excerpt(ctx, head, cases=2)
     return ok, "pre-existing" in verdict, verdict
+
+
+def code_excerpt(
+    root: Path, file: str, start: int, end: int, context: int = 10, max_lines: int = 70
+) -> CodeExcerpt | None:
+    try:
+        lines = (root / file).read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    lo = max(1, start - context)
+    hi = min(len(lines), max(end + context, lo), lo + max_lines - 1)
+    return CodeExcerpt(file=file, start=lo, lines=lines[lo - 1 : hi], highlight=(start, end))
+
+
+async def check_proposed_fix(ctx: ReviewContext, f: Finding, valid: list[Evidence]) -> FixResult | str:
+    """Independently re-check the agent's fix. Returns a FixResult, or a reason the fix was discarded."""
+    try:
+        changes = plan_edits(ctx.ws.head, ctx.cfg, f.fix_edits)
+    except EditError as e:
+        return f"proposed fix discarded: {e}"
+    if not changes:
+        return "proposed fix discarded: it changes nothing"
+    p = ctx.cfg.project(f.project)
+    if any(ctx.cfg.project_for(c.file) is not p for c in changes):
+        return f"proposed fix discarded: it edits files outside project {p.name}"
+    repro = [ev.test_code for ev in valid if ev.kind == "failing_test" and ev.test_code]
+    regressed = [ev.test_id for ev in valid if ev.kind == "test_regression" and ev.test_id]
+    suite = ctx.suites.get(p.name)
+    known = {c.id for c in suite.head.cases} if suite and suite.head else set()
+    must_pass = [k for t in regressed for k in known if k == t or k.endswith(t) or t.endswith(k)]
+    try:
+        check = await ctx.runner.check_fix(ctx.ws.head, p, changes, repro, suite.head if suite else None, must_pass)
+    except Exception as e:
+        return f"proposed fix could not be checked: {e}"
+    if not check.ok:
+        status = "failed"
+    elif check.checked_tests:
+        status = "verified"
+    else:
+        status = "unverified"
+    return FixResult(status=status, patch=unified_patch(changes), notes=check.notes)
 
 
 async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyReport:
@@ -182,6 +233,13 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
             report.dropped.append((f, "duplicate"))
             continue
         seen.add(fp)
+        fix = None
+        if f.fix_edits:
+            checked = await check_proposed_fix(ctx, f, valid)
+            if isinstance(checked, str):
+                notes.append(checked)
+            else:
+                fix = checked
         report.kept.append(
             VerifiedFinding(
                 finding=f,
@@ -190,6 +248,8 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
                 notes=notes,
                 pre_existing=pre_existing and not introduced,
                 evidence=valid,
+                fix=fix,
+                code=code_excerpt(ctx.ws.head, rel, f.line_start, f.line_end),
             )
         )
 

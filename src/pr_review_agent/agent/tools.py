@@ -14,11 +14,12 @@ from claude_agent_sdk import McpSdkServerConfig, ToolAnnotations, create_sdk_mcp
 from ..adapters import adapter_for
 from ..adapters.base import broken_test_reason
 from ..files import iter_source_files
-from ..models import TestRun
+from ..fixes import EditError, plan_edits, unified_patch
+from ..models import FixEdit, TestRun
 from .context import ReviewContext
 
 SERVER_NAME = "review"
-TOOL_NAMES = ["run_repro_test", "run_existing_tests", "static_findings", "find_references"]
+TOOL_NAMES = ["run_repro_test", "check_fix", "run_existing_tests", "static_findings", "find_references"]
 MAX_OUTPUT = 3500
 
 
@@ -89,6 +90,55 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
         if ok:
             lines.append("Include this exact test_code as `failing_test` evidence.")
         return _text("\n".join(lines))
+
+    @tool(
+        "check_fix",
+        "Try a fix for a bug you proved. Applies exact search/replace edits to the head checkout, runs your "
+        "failing test (it must now PASS), the project's existing tests (none may start failing) and its static "
+        "checks (no new errors), then restores the files. Put edits that pass into the finding's fix_edits.",
+        {
+            "type": "object",
+            "properties": {
+                "project": {"type": "string"},
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file": {"type": "string", "description": "Repo-relative source file."},
+                            "old": {"type": "string", "description": "Exact current text; must occur once."},
+                            "new": {"type": "string", "description": "Replacement text."},
+                        },
+                        "required": ["file", "old", "new"],
+                    },
+                },
+                "test_code": {"type": "string", "description": "The failing repro test this fix should make pass."},
+            },
+            "required": ["project", "edits"],
+        },
+    )
+    async def check_fix(args: dict[str, Any]) -> dict[str, Any]:
+        try:
+            p = ctx.project(args["project"])
+            changes = plan_edits(ctx.ws.head, ctx.cfg, [FixEdit.model_validate(e) for e in args["edits"]])
+            if not changes:
+                return _text("The edits change nothing.", True)
+            outside = [c.file for c in changes if ctx.cfg.project_for(c.file) is not p]
+            if outside:
+                return _text(f"A fix must stay inside project {p.name}; these files are not: {outside}", True)
+            ctx.progress(f"checking fix in {p.name} ({', '.join(c.file for c in changes)})")
+            suite = ctx.suites.get(p.name)
+            tests = [args["test_code"]] if args.get("test_code") else []
+            result = await ctx.runner.check_fix(ctx.ws.head, p, changes, tests, suite.head if suite else None)
+        except EditError as e:
+            return _text(f"Could not apply the edits: {e}", True)
+        except Exception as e:
+            return _text(f"Could not check the fix: {e}", True)
+        verdict = "FIX PASSES" if result.ok else "FIX FAILS"
+        if result.ok and not result.checked_tests:
+            verdict += " (applies cleanly, but no test was run against it)"
+        patch = unified_patch(changes)
+        return _text("\n".join([verdict, *[f"- {n}" for n in result.notes], "", "Patch:", patch[:2500]]))
 
     @tool(
         "run_existing_tests",
@@ -189,7 +239,7 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
     return create_sdk_mcp_server(
         name=SERVER_NAME,
         version="1.0.0",
-        tools=[run_repro_test, run_existing_tests, static_findings, find_references],
+        tools=[run_repro_test, check_fix, run_existing_tests, static_findings, find_references],
     )
 
 

@@ -35,9 +35,7 @@ def test_init_writes_config_and_workflow(monorepo: Path):
     import subprocess
 
     subprocess.run(["git", "init", "-q"], cwd=monorepo, check=True)
-    subprocess.run(
-        ["git", "remote", "add", "origin", "git@github.com:acme/shop.git"], cwd=monorepo, check=True
-    )
+    subprocess.run(["git", "remote", "add", "origin", "git@github.com:acme/shop.git"], cwd=monorepo, check=True)
     result = CliRunner().invoke(app, ["init", str(monorepo)])
     assert result.exit_code == 0, result.output
     assert (monorepo / ".pr-review.toml").exists()

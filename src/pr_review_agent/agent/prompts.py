@@ -8,7 +8,7 @@ from ..adapters import adapter_for
 from ..models import Diagnostic
 from .context import ReviewContext
 
-PROMPT_VERSION = "2"
+PROMPT_VERSION = "3"
 
 SYSTEM_PROMPT = """\
 You are a senior engineer reviewing code for real bugs: wrong logic, broken edge cases, error handling \
@@ -27,6 +27,10 @@ it or drop the finding.
 support it with code_reference evidence: verbatim snippets with exact file and line that make the bug \
 undeniable, and set confidence honestly.
 - Static diagnostics from static_findings may be cited as `static` evidence when they point at a real bug.
+- For each bug you prove, propose the smallest fix in the style of the surrounding code as fix_edits (exact \
+search/replace edits, never touching tests) and confirm it with check_fix: it must make your failing test \
+pass without breaking existing tests. If no fix passes within two attempts, leave fix_edits empty and \
+describe the fix in suggested_fix instead.
 - You have a limited budget. Spend it on proving the most important suspicions: give each suspected bug \
 at most three repro attempts, and return your findings well before running out rather than exploring \
 everything.

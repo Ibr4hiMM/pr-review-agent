@@ -13,6 +13,7 @@ from ..agent.context import ReviewContext
 from ..agent.prompts import PROMPT_VERSION, build_scan_prompt
 from ..agent.reviewer import run_agent
 from ..analyzers import static
+from ..analyzers.tests import SuiteResult
 from ..config import Settings, load_repo_config
 from ..models import SEVERITY_ORDER, Finding, ReviewResult, VerifiedFinding
 from ..render import Stats, dropped_notes
@@ -98,6 +99,7 @@ async def run_scan(
             if adapter_for(p).can_run_tests(p):
                 try:
                     run = await runner.run_tests(ws.head, p)
+                    ctx.suites[p.name] = SuiteResult(project=p.name, head=run)
                     out.notes.append(f"tests {p.name}: {run.summary()}")
                 except Exception as e:
                     out.notes.append(f"tests {p.name}: could not run ({str(e)[:300]}); repro tests will fail too")

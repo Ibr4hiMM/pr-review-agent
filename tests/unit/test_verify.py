@@ -20,15 +20,27 @@ SRC = """export function lastPage(total: number, size: number) {
 
 
 class FakeRunner:
-    """Maps (checkout name, test_code) -> TestRun."""
+    """Maps (checkout name, test_code) -> TestRun; fix checks pass when the patch uses Math.ceil."""
 
     def __init__(self, results):
         self.results = results
         self.calls = []
+        self.fix_calls = []
 
     async def run_repro(self, root, p, code):
         self.calls.append((root.name, code))
         return self.results[(root.name, code)], "backend/test/__pr_review__/repro_x.test.ts"
+
+    async def check_fix(self, root, p, changes, repro, baseline=None, must_pass=None):
+        from pr_review_agent.runner import FixCheck
+
+        self.fix_calls.append((changes, repro))
+        ok = "Math.ceil" in changes[0].patched
+        return FixCheck(
+            ok=ok,
+            notes=["repro test 1 passes with the fix" if ok else "repro test 1 still fails"],
+            checked_tests=bool(repro),
+        )
 
 
 def make_ctx(tmp_path: Path, repo_cfg, results, mode="review", diagnostics=(), suites=None, diff_text=None):
@@ -199,3 +211,31 @@ def test_snippet_matching_tolerates_whitespace_and_small_offsets(tmp_path):
     assert snippet_matches(tmp_path, "f.ts", 1, "const x = 1;")
     assert snippet_matches(tmp_path, "f.ts", 3, "b\n  const x = 1;")
     assert not snippet_matches(tmp_path, "f.ts", 3, "const x = 2;")
+
+
+async def test_fix_is_checked_against_the_repro(tmp_path, repo_cfg):
+    from pr_review_agent.models import FixEdit
+
+    ctx = make_ctx(tmp_path, repo_cfg, {("head", "T"): FAIL, ("base", "T"): PASS})
+    good = finding(
+        Evidence(kind="failing_test", test_code="T"),
+        fix_edits=[FixEdit(file="backend/src/page.ts", old="Math.floor", new="Math.ceil")],
+    )
+    [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[good]))).kept
+    assert v.fix.status == "verified" and "+  return Math.ceil(total / size);" in v.fix.patch
+    assert ctx.runner.fix_calls[0][1] == ["T"]
+    assert v.code.file == "backend/src/page.ts" and v.code.highlight == (2, 2) and v.code.start == 1
+
+    bad = finding(
+        Evidence(kind="failing_test", test_code="T"),
+        fix_edits=[FixEdit(file="backend/src/page.ts", old="Math.floor", new="Math.round")],
+    )
+    [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[bad]))).kept
+    assert v.fix.status == "failed" and v.tier == "verified"  # a bad fix doesn't sink a proven bug
+
+    wrong = finding(
+        Evidence(kind="failing_test", test_code="T"),
+        fix_edits=[FixEdit(file="backend/src/page.ts", old="does not exist", new="x")],
+    )
+    [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[wrong]))).kept
+    assert v.fix is None and any("fix discarded" in n for n in v.notes)

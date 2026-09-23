@@ -45,6 +45,15 @@ class Evidence(BaseModel):
     why_relevant: str | None = Field(None, description="code_reference: why this code proves the bug.")
 
 
+class FixEdit(BaseModel):
+    file: str = Field(description="Repo-relative path of the source file to change (never a test file).")
+    old: str = Field(
+        description="Exact text currently in the file, copied verbatim with its indentation. It must occur "
+        "exactly once, so include enough surrounding lines to make it unique."
+    )
+    new: str = Field(description="The replacement text.")
+
+
 class Finding(BaseModel):
     title: str = Field(description="One-line statement of the defect.")
     severity: Severity
@@ -55,7 +64,12 @@ class Finding(BaseModel):
     line_end: int = Field(description="1-based last line of the buggy code in head.")
     explanation: str = Field(description="What goes wrong, for which input, and why. Be concrete.")
     confidence: float = Field(ge=0, le=1, description="Your confidence that this is a real bug.")
-    suggested_fix: str | None = Field(None, description="Short description or snippet of the fix.")
+    suggested_fix: str | None = Field(None, description="One or two sentences describing the fix.")
+    fix_edits: list[FixEdit] = Field(
+        default_factory=list,
+        description="The smallest code change that fixes the bug, as exact search/replace edits. Try it with "
+        "check_fix first: it must make your failing test pass without breaking existing tests.",
+    )
     evidence: list[Evidence]
 
 
@@ -123,6 +137,31 @@ class TestRun(BaseModel):
         return f"{len(self.passed)} passed, {len(self.failed)} failed (exit {self.exit_code})"
 
 
+FixStatus = Literal["verified", "unverified", "failed"]
+
+
+class FixResult(BaseModel):
+    """The agent's proposed fix after we checked it.
+
+    verified: applied cleanly, the failing test(s) now pass, no existing test or static check regressed.
+    unverified: applies cleanly, but there was no executable evidence to check it against.
+    failed: applies, but a check failed (see notes); shown for transparency, never posted as a fix.
+    """
+
+    status: FixStatus
+    patch: str  # unified diff, `git apply`-able from the repo root
+    notes: list[str] = Field(default_factory=list)
+
+
+class CodeExcerpt(BaseModel):
+    """Head source around the finding, captured before the checkout is deleted (for the UI)."""
+
+    file: str
+    start: int  # line number of lines[0]
+    lines: list[str]
+    highlight: tuple[int, int]
+
+
 class VerifiedFinding(BaseModel):
     finding: Finding
     tier: Tier
@@ -130,6 +169,13 @@ class VerifiedFinding(BaseModel):
     notes: list[str] = Field(default_factory=list)
     pre_existing: bool = False
     evidence: list[Evidence] = Field(default_factory=list)  # only evidence that passed verification
+    fix: FixResult | None = None
+    code: CodeExcerpt | None = None
+
+
+class DroppedFinding(BaseModel):
+    finding: Finding
+    reason: str
 
 
 _STOPWORDS = {

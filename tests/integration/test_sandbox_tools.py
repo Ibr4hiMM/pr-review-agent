@@ -103,3 +103,31 @@ async def test_sandbox_blocks_network_and_secrets(env):
     res = await sb.exec(ws.head, ".", "env", network=False, timeout=30)
     assert "ANTHROPIC_API_KEY" not in res.output and "GITHUB_TOKEN" not in res.output
     assert not (ws.head / "shop/.env").exists()  # git-ignored secrets never reach the checkout
+
+
+async def test_check_fix_on_real_tests(env):
+    from pr_review_agent.fixes import plan_edits
+    from pr_review_agent.models import FixEdit
+
+    settings, ws = env
+    cfg = load_repo_config(ws.base)
+    shop = cfg.project("shop")
+    runner = ProjectRunner(make_sandbox("local", settings.cache_dir), settings)
+    before = (ws.head / "shop/src/pagination.ts").read_text()
+
+    def edits(new):
+        return plan_edits(
+            ws.head, cfg, [FixEdit(file="shop/src/pagination.ts", old="return Math.floor(total / pageSize);", new=new)]
+        )
+
+    good = await runner.check_fix(ws.head, shop, edits("return Math.ceil(total / pageSize);"), [REPRO])
+    assert good.ok and good.checked_tests, good.notes
+
+    useless = await runner.check_fix(ws.head, shop, edits("return Math.floor(total / pageSize) || 0;"), [REPRO])
+    assert not useless.ok and "still fails" in " ".join(useless.notes)
+
+    # Passes the repro (41 -> 3 pages) but breaks the existing test (40 items -> 2 pages).
+    breaking = await runner.check_fix(ws.head, shop, edits("return Math.ceil((total + 1) / pageSize);"), [REPRO])
+    assert not breaking.ok and "breaks existing tests" in " ".join(breaking.notes)
+
+    assert (ws.head / "shop/src/pagination.ts").read_text() == before  # always restored

@@ -4,6 +4,11 @@ An AI code reviewer built on the **Claude Agent SDK** that only reports bugs it 
 
 - **`review`** a GitHub pull request (and optionally post the review), or **`review-local`** a branch.
 - **`scan`** a whole repository, highest-risk code first, within a spending cap.
+- **Fix** what it finds: every proven bug comes with a patch that's only called *verified* once the failing test
+  passes with it and nothing else breaks.
+- **`ui`**: a local dashboard of every run, showing each bug's proof, the code and the fix.
+
+![The pr-review dashboard showing a proven bug, its verification trail and a verified fix](docs/dashboard.png)
 
 Claude *proposes* findings; deterministic code *verifies* them before anything is reported:
 
@@ -26,8 +31,22 @@ scan:   local repo ─► risk-ranked chunks ──┘                          
                                                                                                          sandboxed tools)
 ```
 
-The agent gets `Read`, `Grep`, `Glob` and four custom tools: `run_repro_test`, `run_existing_tests`,
-`static_findings` and `find_references`. It has **no shell, no write access, no network and no GitHub token**.
+The agent gets `Read`, `Grep`, `Glob` and five custom tools: `run_repro_test`, `check_fix`,
+`run_existing_tests`, `static_findings` and `find_references`. It has **no shell, no write access, no network and no GitHub token**.
+
+## Verified fixes
+
+For each bug it proves, the agent proposes the smallest fix as exact search/replace edits and tries it with
+`check_fix`. After the agent finishes, pr-review checks the fix again, independently:
+
+1. The edits must apply cleanly, touch only source files in the bug's project, and never touch tests.
+2. With the patch applied, the agent's failing test must **pass**.
+3. The project's existing test suite must not gain any failures.
+4. The static checks (`tsc`, ruff, …) must not report new problems in the changed files.
+
+The files are always restored afterwards. A fix that passes all four is **Verified**. One that applies but had no
+test to check it against is **Not tested**. One that fails a check is kept only in the dashboard, marked
+**Failed its checks**, and never posted to GitHub. Every patch is a normal unified diff you can `git apply`.
 
 ## Safety model
 
@@ -82,7 +101,29 @@ pr-review review https://github.com/me/my-app/pull/42 --post
 
 # Review a local branch like a PR (nothing is posted).
 pr-review review-local ~/code/my-app --base main --head my-feature
+
+# Browse every run: bugs, proof, code and fixes.
+pr-review ui
 ```
+
+## Dashboard
+
+`pr-review ui` opens a local dashboard at `http://127.0.0.1:8765` with every scan and review you've run. Each
+run is saved as a JSON file in `~/.local/share/pr-review-agent/runs/`.
+
+- **Runs** on the left. **Findings** in the middle, filterable by severity, "proven only", "has verified fix"
+  or text. Move through them with `j`/`k` or the arrow keys.
+- For each bug, a **verification trail** shows the proof in order: passes before the change, fails with it,
+  passes with the fix, existing tests still pass. Below it are the explanation, the code with the buggy lines
+  marked, the fix as a diff (**Copy patch** / **Download patch**), and the evidence: the agent's test, its real
+  output, quoted code.
+- Suspicions that didn't survive verification are listed under **Dropped by verification**, with the reason.
+
+The GitHub Action uploads each PR review's run as an artifact. Download it, unzip it, and open it with
+`pr-review ui --runs-dir <folder>`.
+
+The server only listens on 127.0.0.1, rejects requests for other host names (DNS-rebinding protection), is
+read-only, and serves a strict Content-Security-Policy. All code and agent text is rendered as text, never HTML.
 
 Common options: `--sandbox auto|docker|local` (`auto` uses Docker when it's available), `--model` (default
 `claude-opus-5`) and `-v` for debug logs. Environment overrides: `PR_REVIEW_MODEL`, `PR_REVIEW_EFFORT` (default
@@ -145,11 +186,12 @@ known bugs, or none for false-positive checks.
 |---|---|---|
 | eval `ts-shop-bugs` (2 seeded bugs) | 2/2 found, both Verified, 0 false positives | $0.17 |
 | eval `ts-shop-clean` (harmless refactor) | 0 findings | $0.22 |
+| branch review of `ts-shop-bugs`, with fixes | 2/2 found, both fixes Verified (repro passes, suite passes, no new `tsc` errors) | $0.66 |
 
 ## Limitations / next steps
 
-- The Docker sandbox is covered by unit tests of its `docker run` flags but hasn't been exercised against a
-  real daemon yet. Run `uv run pytest -m docker` once Docker is installed.
+- The Docker sandbox runs against a real daemon in CI on every push. Locally, `--sandbox local` is used until
+  Docker is installed.
 - TypeScript tests must run on vitest (jest isn't parsed yet). Dart/Flutter support is planned.
 - A failing test proves the code behaves as described, not that the behaviour is wrong. The explanation says
   why it's a bug, so read it.

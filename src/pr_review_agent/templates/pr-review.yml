@@ -31,3 +31,13 @@ jobs:
           uvx --from "__TOOL_SOURCE__" pr-review review
           "${{ github.repository }}#${{ github.event.pull_request.number }}"
           --post --sandbox docker
+      # The run record (bugs, evidence, fixes). Download the artifact, unzip it, and browse it with
+      # `pr-review ui --runs-dir <folder>`.
+      - name: Keep the review for the dashboard
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-review-run-${{ github.event.pull_request.number }}-${{ github.run_attempt }}
+          path: ~/.local/share/pr-review-agent/runs/
+          if-no-files-found: ignore
+          retention-days: 30
