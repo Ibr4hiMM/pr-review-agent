@@ -36,6 +36,25 @@ class RunRecord(BaseModel):
     chunks_total: int | None = None
     repo_path: str | None = None  # local checkout the run came from (scans and branch reviews)
     sources: dict[str, str] = Field(default_factory=dict)  # file -> content at the reviewed commit
+    # Scans: what was asked for, so an unfinished scan can be continued with the same settings.
+    budget_usd: float | None = None
+    projects: list[str] = Field(default_factory=list)  # empty = every enabled project
+    uncommitted: bool | None = None  # None on runs saved before this was recorded
+    continues: str | None = None  # id of the unfinished scan this one picked up
+
+    def unfinished(self) -> bool:
+        """A scan that stopped (usage limit, or chunks that didn't finish) before reviewing every chunk."""
+        return self.kind == "scan" and (self.chunks_done or 0) < (self.chunks_total or 0)
+
+    def scan_request(self) -> dict[str, Any]:
+        """The scan to run to pick up where this one stopped. Older runs didn't save the projects or the
+        uncommitted switch: the projects are in the target, and the dashboard included uncommitted changes
+        by default."""
+        projects = self.projects
+        prefix = f"{self.repo_path} ("
+        if not projects and self.target.startswith(prefix) and self.target.endswith(")"):
+            projects = self.target[len(prefix) : -1].split(", ")
+        return {"repo_path": self.repo_path, "projects": projects, "uncommitted": self.uncommitted is not False}
 
     def summary(self) -> dict[str, Any]:
         verified = sum(v.tier == "verified" for v in self.findings)
@@ -55,6 +74,7 @@ class RunRecord(BaseModel):
             "severities": {
                 s: sum(v.finding.severity == s for v in self.findings) for s in ("critical", "high", "medium", "low")
             },
+            "continues": self.continues,
         }
 
 

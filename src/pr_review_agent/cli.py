@@ -221,6 +221,12 @@ def scan(
         f = v.finding
         fix = f"  [fix {v.fix.status}]" if v.fix else ""
         typer.echo(f"  [{v.tier}] {f.severity:<8} {f.file}:{f.line_start}  {f.title}{fix}")
+    if res.chunks_done < res.chunks_total:
+        typer.secho(
+            f"Stopped after {res.chunks_done} of {res.chunks_total} chunks. Run the same command again to "
+            "continue: reviewed chunks are cached, so the budget only goes to the rest.",
+            fg="yellow",
+        )
     typer.echo(f"Report: {out / 'pr-review-report.md'}")
     _saved(record, settings)
 

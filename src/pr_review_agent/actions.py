@@ -30,6 +30,7 @@ async def scan(
     uncommitted: bool = False,
     concurrency: int = 3,
     emit: Emit = _no_events,
+    continues: str | None = None,
 ) -> tuple[ScanOutcome, RunRecord]:
     res = await run_scan(
         repo_path, settings, sandbox, progress, projects, budget_usd, max_chunks, uncommitted, concurrency, emit
@@ -49,6 +50,10 @@ async def scan(
         chunks_total=res.chunks_total,
         repo_path=str(repo_path.resolve()),
         sources=res.sources,
+        budget_usd=budget_usd,
+        projects=projects or [],
+        uncommitted=uncommitted,
+        continues=continues,
     )
     save_run(record, settings.runs_dir)
     return res, record

@@ -311,6 +311,47 @@ function runMeta(run) {
   return parts.join(", ");
 }
 
+// The job or run that picked up an unfinished scan, so it isn't continued twice.
+function continuationOf(runId) {
+  const job = state.jobs.find((j) => j.params.continues === runId && (j.status === "running" || j.status === "queued"));
+  if (job) return h("a", { href: `#/jobs/${job.id}` }, "It's being continued now");
+  const run = state.runs.find((r) => r.continues === runId);
+  return run ? h("a", { href: `#/r/${encodeURIComponent(run.id)}` }, "Open the run that continued it") : null;
+}
+
+// Offered when a scan stopped before reviewing every chunk: scan again with a new limit. Reviewed chunks
+// come from the cache, so the whole limit goes to the chunks that are left.
+function continueBox(runId, done, total, budget) {
+  const title = h("h2", { class: "continue-title" }, `${plural(total - done, "chunk")} not reviewed yet`);
+  const next = continuationOf(runId);
+  if (next) return h("section", { class: "continue" }, title, h("p", {}, "This scan stopped before the end. ", next, "."));
+  const amount = h("input", { class: "input", type: "number", min: "1", max: "100", step: "0.5", value: budget || 5 });
+  const error = h("p", { class: "field-error", role: "alert" });
+  const btn = h("button", { class: "btn btn-primary", type: "button", onclick: async () => {
+    btn.disabled = true;
+    error.textContent = "";
+    try {
+      const job = await api(`/api/runs/${encodeURIComponent(runId)}/continue`, { body: { budget_usd: Number(amount.value) } });
+      state.jobs = [job, ...state.jobs.filter((j) => j.id !== job.id)];
+      refreshJobs();
+      location.hash = `#/jobs/${job.id}`;
+    } catch (e) {
+      error.textContent = e.message;
+      btn.disabled = false;
+    }
+  } }, "Continue");
+  return h("section", { class: "continue" }, title,
+    h("p", {}, `The scan stopped after ${done} of ${total} chunks, riskiest first. Continuing reviews the rest. `,
+      "Chunks already reviewed are reused at no cost, and the new run keeps everything this one found."),
+    h("div", { class: "continue-row" },
+      // The input sits inside its label: the list pane keeps its last run's content while a job page
+      // shows, so an id could exist twice.
+      h("label", { class: "continue-amount" }, "Usage limit for the rest",
+        h("span", { class: "money-input" }, h("span", { "aria-hidden": "true" }, "$"), amount)),
+      btn),
+    error);
+}
+
 function renderList() {
   const pane = document.getElementById("list");
   const run = state.run;
@@ -334,12 +375,15 @@ function renderList() {
       h("h1", { class: "run-title" }, run.repo),
       h("p", { class: "run-meta" }, run.target),
       h("p", { class: "run-meta" }, runMeta(run)),
+      run.continues ? h("p", { class: "run-meta" }, "Picks up where ", h("a", { href: `#/r/${encodeURIComponent(run.continues)}` }, "an earlier scan"), " stopped.") : null,
       run.url ? h("p", { class: "run-meta" }, h("a", { href: run.url, target: "_blank", rel: "noreferrer" }, "Open the pull request on GitHub")) : null,
       h("div", { class: "tally" },
         h("div", { class: "is-verified" }, tallyNum(verified, fresh), h("span", {}, "proven by a test")),
         h("div", {}, tallyNum(run.findings.length - verified, fresh), h("span", {}, "possible")),
         h("div", { class: "is-fixed" }, tallyNum(fixes, fresh), h("span", {}, fixes === 1 ? "verified fix" : "verified fixes")),
-        h("div", {}, tallyNum(open, fresh), h("span", {}, "still open")))),
+        h("div", {}, tallyNum(open, fresh), h("span", {}, "still open"))),
+      run.kind === "scan" && run.repo_path && run.chunks_done < run.chunks_total
+        ? continueBox(run.id, run.chunks_done, run.chunks_total, run.budget_usd) : null),
     h("div", { class: "filters", role: "group", "aria-label": "Filter findings" },
       SEVERITIES.map((s) => h("button", { class: "chip", type: "button", "aria-pressed": String(f.sev.includes(s)),
         onclick: () => setFilter({ sev: f.sev.includes(s) ? f.sev.filter((x) => x !== s) : [...f.sev, s] }) }, SEV_LABEL[s])),
@@ -971,10 +1015,10 @@ async function renderNewScan() {
   const budget = h("div", { class: "field field-narrow" },
     h("label", { class: "field-label", for: "budget" }, "Usage limit"),
     h("div", { class: "money-input" }, h("span", { "aria-hidden": "true" }, "$"),
-      h("input", { class: "input", id: "budget", type: "number", min: "0.3", max: "100", step: "0.5", value: form.budget[form.kind],
+      h("input", { class: "input", id: "budget", type: "number", min: form.kind === "scan" ? "1" : "0.3", max: "100", step: "0.5", value: form.budget[form.kind],
         oninput: (e) => { form.budget[form.kind] = e.target.value; } })),
     h("p", { class: "hint" }, form.kind === "scan"
-      ? "Measured at API prices. With a Claude login this comes out of your plan's usage, not your card. The riskiest code is reviewed first, and the scan stops at this amount."
+      ? "Measured at API prices. With a Claude login this comes out of your plan's usage, not your card. The riskiest code is reviewed first, and the scan stops at this amount. You can continue it afterwards."
       : "Measured at API prices. The review stops at this amount."));
 
   let fields = [];
@@ -1241,11 +1285,13 @@ async function renderJob(jobId) {
   let shownFindings = 0;
 
   const progressSection = h("section", { class: "section live-progress" });
+  const continueHost = h("div", {});
   pane.replaceChildren(h("article", { class: pageClass("live") },
     h("a", { class: "back", href: "#/" }, "Overview"),
     h("h1", { class: "page-title" }, job.title),
     statusLine,
     actions,
+    continueHost,
     meter,
     counterRow,
     progressSection,
@@ -1282,7 +1328,11 @@ async function renderJob(jobId) {
     const proven = (st.findings || []).filter((f) => f.tier === "verified").length;
     const fixes = (st.findings || []).filter((f) => f.fix === "verified").length;
     counters.chunks.parentElement.hidden = !chunks.length;
-    const reviewed = chunks.filter((c) => ["done", "cached", "failed"].includes(c.state)).length;
+    // Chunks that didn't finish aren't counted, the same as in the saved run.
+    const reviewed = chunks.filter((c) => c.state === "done" || c.state === "cached").length;
+    if (job.kind === "scan" && job.status === "done" && job.run_id && reviewed < chunks.length && !continueHost.firstChild) {
+      continueHost.append(continueBox(job.run_id, reviewed, chunks.length, job.params.budget_usd));
+    }
     L.countUp(counters.chunks, reviewed);
     counters.chunks.nextSibling.textContent = `of ${chunks.length} chunks reviewed`;
     L.countUp(counters.tests, st.tests || 0);
@@ -1380,6 +1430,7 @@ async function renderGuide() {
   const steps = [
     ["Start a scan", [
       h("p", {}, "Click ", h("a", { href: "#/new" }, "New scan"), ", pick a repository folder (Choose folder… opens the Finder picker), choose the projects and a usage limit, then Start scan. Progress appears live; open the results when it finishes. The same page reviews a branch, or a pull request picked from your GitHub repositories."),
+      h("p", {}, "If the limit runs out before every chunk is reviewed, the results offer Continue. It reviews only the chunks that are left, with a new limit, and the new run keeps everything already found. In a terminal, run the same command again."),
       h("p", {}, "From a terminal it's the same thing:"), cmd("pr-review scan ~/code/my-app --project backend --uncommitted --max-budget-usd 5")]],
     ["Read a finding", [
       h("p", {}, "Pick a bug in the middle column. The trail at the top shows how it was proven, in order: the test passes before the change, fails with it, passes with the fix, and the existing tests still pass. Red means failing, green means passing."),

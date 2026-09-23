@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 from ..config import Settings, load_repo_config
 from ..github_client import parse_target
+from ..runs import RUN_ID_RE
 from .repos import RepoError, ref_exists, repo_root
 
 JobKind = Literal["scan", "review-local", "review"]
@@ -109,19 +110,21 @@ class Job:
         }
 
 
-def _budget(params: dict[str, Any], default: float) -> float:
+def _budget(params: dict[str, Any], default: float, minimum: float = MIN_BUDGET) -> float:
     try:
         value = float(params.get("budget_usd", default))
     except (TypeError, ValueError):
         raise RepoError("The spending limit must be a number.") from None
-    if not MIN_BUDGET <= value <= MAX_BUDGET:
-        raise RepoError(f"The spending limit must be between ${MIN_BUDGET:.2f} and ${MAX_BUDGET:.0f}.")
+    if not minimum <= value <= MAX_BUDGET:
+        raise RepoError(f"The spending limit must be between ${minimum:.2f} and ${MAX_BUDGET:.0f}.")
     return value
 
 
 def validate(kind: str, params: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """Check what the form sent and normalize it. Raises RepoError with a message for the person."""
     if kind == "scan":
+        from ..scan.runner import MIN_CHUNK_BUDGET
+
         root = repo_root(str(params.get("repo_path", "")))
         cfg = load_repo_config(root)
         enabled = [p.name for p in cfg.enabled_projects()]
@@ -131,14 +134,19 @@ def validate(kind: str, params: dict[str, Any]) -> tuple[dict[str, Any], str]:
             raise RepoError(f"These projects can't be scanned: {', '.join(unknown)}.")
         if not enabled:
             raise RepoError("No supported projects were found in this repository.")
+        continues = params.get("continues")
+        if continues is not None and not RUN_ID_RE.match(str(continues)):
+            raise RepoError("That run can't be continued.")
         clean = {
             "repo_path": str(root),
             "projects": projects,
-            "budget_usd": _budget(params, 5.0),
+            # Less than one chunk's minimum and the scan would stop before reviewing anything.
+            "budget_usd": _budget(params, 5.0, MIN_CHUNK_BUDGET),
             "uncommitted": bool(params.get("uncommitted", True)),
+            "continues": continues,
         }
         scope = f" ({', '.join(projects)})" if projects else ""
-        return clean, f"Scan {root.name}{scope}"
+        return clean, f"Scan {root.name}{scope}" + (", continued" if continues else "")
     if kind == "review-local":
         root = repo_root(str(params.get("repo_path", "")))
         base, head = str(params.get("base", "")), str(params.get("head", ""))
@@ -186,6 +194,7 @@ async def execute(job: Job, settings: Settings, progress: Callable[[str], None])
             None,
             p["uncommitted"],
             emit=emit,
+            continues=p.get("continues"),
         )
     elif job.kind == "review-local":
         s.review_budget_usd = p["budget_usd"]
@@ -260,13 +269,25 @@ class JobManager:
             d["phase"] = snap.get("phase")
             d["proven"] = sum(1 for f in snap.get("findings", []) if f.get("tier") == "verified")
             chunks = snap.get("chunks") or []
-            d["chunks_done"] = sum(c["state"] in ("done", "cached", "failed") for c in chunks)
+            d["chunks_done"] = sum(c["state"] in ("done", "cached") for c in chunks)
             d["chunks_total"] = len(chunks)
             out.append(d)
         return out
 
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
+
+    def continuing(self, run_id: str) -> Job | None:
+        """The queued or running job that picks up the scan `run_id`, if there is one."""
+        with self._lock:
+            return next(
+                (
+                    j
+                    for j in self.jobs.values()
+                    if j.params.get("continues") == run_id and j.status in ("queued", "running")
+                ),
+                None,
+            )
 
     def cancel(self, job_id: str) -> Job | None:
         job = self.jobs.get(job_id)

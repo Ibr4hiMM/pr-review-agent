@@ -68,7 +68,7 @@ def test_summary_lists_outside_diff_findings_in_full():
 
 def test_scan_report_mentions_budget_cutoff():
     md = scan_report("me/repo", "b" * 40, [vf()], Stats(), ["tests backend: 28 passed"], 3, 10)
-    assert "Budget ran out after 3 of 10" in md and "lastPage" in md
+    assert "Budget ran out after 3 of 10" in md and "Run the same command again to continue" in md and "lastPage" in md
 
 
 def test_agent_schema_is_flat_and_serializable():

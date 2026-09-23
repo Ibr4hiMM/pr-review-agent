@@ -30,7 +30,7 @@ from ..config import Settings, github_token
 from ..runs import RUN_ID_RE, RunRecord, list_runs, load_run
 from ..workspace import repo_slug
 from . import github as gh_lookup
-from .jobs import JobManager
+from .jobs import Job, JobManager
 from .repos import RepoError, apply_fix, fix_state, pick_folder, repo_info, repo_root, undo_fix
 from .store import Store
 
@@ -51,6 +51,7 @@ _RUN = re.compile(r"^/api/runs/([^/]+)$")
 _PATCH = re.compile(r"^/api/runs/([^/]+)/patch/([0-9a-f]{12})$")
 _JOB = re.compile(r"^/api/jobs/([0-9a-f]{10})$")
 _JOB_CANCEL = re.compile(r"^/api/jobs/([0-9a-f]{10})/cancel$")
+_RUN_CONTINUE = re.compile(r"^/api/runs/([^/]+)/continue$")
 
 
 class App:
@@ -70,6 +71,16 @@ class App:
 
     def run(self, run_id: str) -> RunRecord | None:
         return load_run(self.runs_dir, run_id) if RUN_ID_RE.match(run_id) else None
+
+    def continue_scan(self, run_id: str, budget_usd: Any) -> Job:
+        """Scan again with the same settings. Reviewed chunks come from the cache, so the new usage limit
+        goes to the chunks this run didn't get to, and the new run holds everything found by both."""
+        record = self.run(run_id)
+        if record is None or not record.unfinished():
+            raise RepoError("Only a scan that stopped before reviewing every chunk can be continued.")
+        if self.jobs.continuing(record.id):
+            raise RepoError("This scan is already being continued.")
+        return self.jobs.submit("scan", {**record.scan_request(), "budget_usd": budget_usd, "continues": record.id})
 
 
 class DashboardHandler(BaseHTTPRequestHandler):
@@ -293,6 +304,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/jobs":
                 job = self.app.jobs.submit(str(data.get("kind", "")), data)
+                self._json(job.to_dict(), HTTPStatus.CREATED)
+            elif m := _RUN_CONTINUE.match(path):
+                job = self.app.continue_scan(m[1], data.get("budget_usd"))
                 self._json(job.to_dict(), HTTPStatus.CREATED)
             elif m := _JOB_CANCEL.match(path):
                 job = self.app.jobs.cancel(m[1])

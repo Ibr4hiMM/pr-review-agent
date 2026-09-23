@@ -157,7 +157,8 @@ def scan_report(
     if chunks_done < chunks_total:
         lines += [
             f"> Budget ran out after {chunks_done} of {chunks_total} chunks (highest-risk first). "
-            "Re-run with a larger `--max-budget-usd`; reviewed chunks are cached.",
+            "Run the same command again to continue: reviewed chunks are cached, so the new budget only goes "
+            "to the rest.",
             "",
         ]
     if kept:
