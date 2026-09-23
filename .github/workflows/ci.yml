@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: uv sync --locked
+      - run: uv run ruff check src tests
+      - run: uv run pytest -q
+      # Real sandboxed installs + test runs on the seeded fixture (no API calls). The local sandbox has no
+      # network isolation on Linux, so this also exercises the docker sandbox below.
+      - run: uv run pytest -m integration -q
+      - run: uv run pytest -m docker -q

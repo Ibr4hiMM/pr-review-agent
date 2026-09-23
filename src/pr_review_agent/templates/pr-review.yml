@@ -1,0 +1,33 @@
+# Written by `pr-review init`. Reviews every non-draft PR with pr-review-agent.
+# Setup: add an ANTHROPIC_API_KEY repository secret (e.g. `gh secret set ANTHROPIC_API_KEY`).
+name: pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: pr-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Fork PRs don't receive secrets on `pull_request`, so they are skipped. Never switch this workflow
+    # to `pull_request_target`: that would run untrusted PR code with write access and secrets.
+    if: github.event.pull_request.draft == false && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: astral-sh/setup-uv@v6
+      - name: Review pull request
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >
+          uvx --from "__TOOL_SOURCE__" pr-review review
+          "${{ github.repository }}#${{ github.event.pull_request.number }}"
+          --post --sandbox docker

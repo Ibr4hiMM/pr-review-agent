@@ -1,0 +1,49 @@
+[project]
+name = "pr-review-agent"
+version = "0.1.0"
+description = "AI pull-request reviewer and codebase scanner that only reports bugs it can back with evidence"
+readme = "README.md"
+authors = [
+    { name = "Ibr4hiMM", email = "haklash1792@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "claude-agent-sdk>=0.2.158",
+    "githubkit>=0.16.1",
+    "pydantic>=2.13.5",
+    "pydantic-settings>=2.15.0",
+    "ruff>=0.16.8",
+    "typer>=0.27.2",
+    "unidiff>=1.0.1",
+]
+
+[project.scripts]
+pr-review = "pr_review_agent.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "respx>=0.23.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "integration: installs dependencies and runs real test suites in a sandbox (needs network + node/python toolchains)",
+    "docker: needs a running Docker daemon",
+    "eval: calls the Claude API (costs money)",
+]
+addopts = "-m 'not integration and not docker and not eval'"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
