@@ -11,6 +11,7 @@ from ..config import matches_any
 from .context import ReviewContext
 
 GUARDED_TOOLS = "Read|Grep|Glob"
+MAX_READ_LINES = 400  # a whole 3,800-line file per Read was the biggest single token cost
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -38,6 +39,34 @@ def check_path(raw: str, cwd: Path, roots: list[Path], ignore: list[str]) -> str
     return None
 
 
+def _cap_read(tool_input: dict[str, Any], cwd: Path) -> dict[str, Any]:
+    """Limit a Read to MAX_READ_LINES at a time when the file is longer than that."""
+    limit = tool_input.get("limit")
+    if isinstance(limit, int) and 0 < limit <= MAX_READ_LINES:
+        return {}
+    raw = tool_input.get("file_path")
+    if not isinstance(raw, str):
+        return {}
+    path = Path(raw) if Path(raw).is_absolute() else cwd / raw
+    try:
+        with path.open("rb") as fh:
+            total = sum(1 for _ in fh)
+    except OSError:
+        return {}
+    offset = tool_input.get("offset") if isinstance(tool_input.get("offset"), int) else 1
+    if total - offset + 1 <= MAX_READ_LINES:
+        return {}
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "allow",
+            "updatedInput": {**tool_input, "offset": offset, "limit": MAX_READ_LINES},
+            "additionalContext": f"{raw} has {total} lines; reads return at most {MAX_READ_LINES} lines. "
+            "Use offset to read the part you need.",
+        }
+    }
+
+
 def path_guard(ctx: ReviewContext) -> HookMatcher:
     roots = ctx.allowed_roots
     cwd = ctx.ws.head.resolve()
@@ -55,6 +84,8 @@ def path_guard(ctx: ReviewContext) -> HookMatcher:
                 reason = check_path(raw, cwd, roots, ctx.cfg.ignore)
                 if reason:
                     return _deny(reason)
+        if input_data.get("tool_name") == "Read":
+            return _cap_read(tool_input, cwd)
         return {}
 
     return HookMatcher(matcher=GUARDED_TOOLS, hooks=[guard])

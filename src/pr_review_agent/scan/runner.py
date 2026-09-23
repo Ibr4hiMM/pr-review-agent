@@ -139,6 +139,10 @@ async def run_scan(
         sem = asyncio.Semaphore(concurrency)
         seen_titles: list[str] = []
         stop = asyncio.Event()
+        # Chunks that start together all pay to write the same ~30K-token prompt prefix to the cache.
+        # Let one chunk go first; the rest start once its first reply shows the prefix is cached.
+        warm = asyncio.Event()
+        leader = asyncio.Lock()
 
         def found(i: int, kept: list[VerifiedFinding]) -> None:
             for v in kept:
@@ -177,9 +181,18 @@ async def run_scan(
                     return
                 emit({"type": "chunk", "i": i, "state": "reviewing"})
                 emit({"type": "spent", "usd": budget.spent, "reserved": budget.reserved})
+                is_leader = not warm.is_set() and not leader.locked()
+                if is_leader:
+                    await leader.acquire()
+                elif not warm.is_set():
+                    try:
+                        await asyncio.wait_for(warm.wait(), timeout=120)
+                    except TimeoutError:
+                        pass
                 progress(f"[{i + 1}/{len(chunks)}] {chunk.project}: {', '.join(chunk.describe_focus())}")
                 prompt = build_scan_prompt(ctx, chunk.describe_focus(), chunk.context, seen_titles)
-                run = await run_agent(ctx, prompt, settings, granted)
+                run = await run_agent(ctx, prompt, settings, granted, on_first_reply=warm.set if is_leader else None)
+                warm.set()  # even if the leader failed before replying, don't hold the others back
                 await budget.settle(granted, run.cost_usd)
                 emit({"type": "spent", "usd": budget.spent, "reserved": budget.reserved})
                 out.stats.turns += run.turns

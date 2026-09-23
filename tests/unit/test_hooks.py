@@ -67,3 +67,28 @@ async def test_hook_denies_with_sdk_shape(roots, repo_cfg):
         None,
     )
     assert ok == {}
+
+
+def test_large_reads_are_capped_and_small_ones_untouched(roots):
+    from pr_review_agent.agent.hooks import MAX_READ_LINES, _cap_read
+
+    head, _ = roots
+    (head / "big.ts").write_text("x\n" * 3800)
+    (head / "small.ts").write_text("x\n" * 50)
+    capped = _cap_read({"file_path": str(head / "big.ts")}, head)["hookSpecificOutput"]
+    assert capped["updatedInput"]["limit"] == MAX_READ_LINES and capped["updatedInput"]["offset"] == 1
+    assert "3800 lines" in capped["additionalContext"]
+    assert _cap_read({"file_path": "small.ts"}, head) == {}
+    assert _cap_read({"file_path": "big.ts", "offset": 1200, "limit": 300}, head) == {}
+    assert _cap_read({"file_path": "big.ts", "offset": 3600}, head) == {}  # fewer than the cap remain
+
+
+def test_agent_sessions_are_lean(roots, repo_cfg):
+    from pr_review_agent.agent.reviewer import build_options
+    from pr_review_agent.config import Settings
+
+    head, base = roots
+    ctx = ReviewContext(mode="scan", ws=Workspace(root=head.parent, head=head, head_sha="x"), cfg=repo_cfg, runner=None)
+    opts = build_options(ctx, Settings(), 2.0)
+    assert opts.strict_mcp_config and opts.skills == [] and opts.setting_sources == []
+    assert opts.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false" and opts.env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"

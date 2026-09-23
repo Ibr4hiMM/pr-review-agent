@@ -8,7 +8,7 @@ from ..adapters import adapter_for
 from ..models import Diagnostic
 from .context import ReviewContext
 
-PROMPT_VERSION = "4"
+PROMPT_VERSION = "5"
 
 SYSTEM_PROMPT = """\
 You are a senior engineer reviewing code for real bugs: wrong logic, broken edge cases, error handling \
@@ -35,6 +35,9 @@ describe the fix in suggested_fix instead.
 - You have a limited budget. Spend it on proving the most important suspicions: give each suspected bug \
 at most three repro attempts, and return your findings well before running out rather than exploring \
 everything.
+- Read only what you need: use Grep to locate code, then Read with offset and limit around it. Never read a \
+whole large file.
+- Keep explanations to at most 4 sentences and the summary to 2. Put the detail in the test, not the prose.
 - Report at most 8 findings, most severe first. Returning zero findings is a good outcome when the code \
 is fine; never pad the list with speculative or stylistic issues.
 

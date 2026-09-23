@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from claude_agent_sdk import (
@@ -28,6 +29,20 @@ from .tools import SERVER_NAME, allowed_tool_names, build_server
 log = logging.getLogger(__name__)
 
 BUILTIN_TOOLS = ["Read", "Grep", "Glob"]
+
+# Everything the Claude Code harness would otherwise load into every session, none of which a reviewer
+# uses. Each of these is re-billed on every turn: connectors from the Claude account alone were
+# thousands of tokens of tool names and instructions. Also a safety measure: the agent reads untrusted
+# code and must never see tools that reach your email, files or databases.
+LEAN_ENV = {
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "false",  # claude.ai connectors (Gmail, Drive, Supabase, ...)
+    "CLAUDE_CODE_DISABLE_CLAUDE_MDS": "1",  # we pass the repo's notes ourselves, from the base branch
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1",
+    "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1",
+    "CLAUDE_CODE_DISABLE_BUNDLED_SKILLS": "1",
+    "CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",  # e.g. background session-title generation
+}
 # Belt and braces: `tools=` already limits the built-ins, `dontAsk` denies anything not allowed.
 DENIED_TOOLS = ["Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", "Agent", "Task", "Skill"]
 
@@ -63,6 +78,9 @@ def build_options(ctx: ReviewContext, settings: Settings, budget_usd: float) -> 
         # Never load settings/hooks/CLAUDE.md from disk: the repo under review is untrusted, and the
         # user's own ~/.claude config shouldn't change how reviews behave.
         setting_sources=[],
+        strict_mcp_config=True,  # only our own tool server
+        skills=[],  # no skill listing in the prompt
+        env=LEAN_ENV,
         max_turns=settings.max_turns,
         max_budget_usd=budget_usd,
         task_budget={"total": task_budget_tokens(budget_usd)},
@@ -84,7 +102,13 @@ def _describe_call(ctx: ReviewContext, block: ToolUseBlock) -> str | None:
     return f"{name} {arg[:80]}".strip()
 
 
-async def run_agent(ctx: ReviewContext, prompt: str, settings: Settings, budget_usd: float) -> AgentRun:
+async def run_agent(
+    ctx: ReviewContext,
+    prompt: str,
+    settings: Settings,
+    budget_usd: float,
+    on_first_reply: Callable[[], None] | None = None,
+) -> AgentRun:
     run = AgentRun()
     start = time.monotonic()
     final: ResultMessage | None = None
@@ -93,6 +117,9 @@ async def run_agent(ctx: ReviewContext, prompt: str, settings: Settings, budget_
     try:
         async for message in query(prompt=prompt, options=build_options(ctx, settings, budget_usd)):
             if isinstance(message, AssistantMessage):
+                if on_first_reply:
+                    on_first_reply()  # the shared prompt prefix is now in the cache
+                    on_first_reply = None
                 for block in message.content:
                     if isinstance(block, ToolUseBlock):
                         run.tool_calls[block.name.removeprefix(f"mcp__{SERVER_NAME}__")] += 1

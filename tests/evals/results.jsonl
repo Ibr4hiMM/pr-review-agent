@@ -1,2 +1,4 @@
 {"ts": "2026-09-23T18:41:12", "fixture": "ts-shop-bugs", "model": "claude-opus-5", "seeded": 2, "found": 2, "false_positives": 0, "verified": 2, "dropped": 0, "cost_usd": 0.1745, "turns": 6}
 {"ts": "2026-09-23T18:44:04", "fixture": "ts-shop-clean", "model": "claude-opus-5", "seeded": 0, "found": 0, "false_positives": 0, "verified": 0, "dropped": 0, "cost_usd": 0.2217, "turns": 8}
+{"ts": "2026-09-24T00:24:08", "fixture": "ts-shop-bugs", "model": "claude-opus-5", "seeded": 2, "found": 2, "false_positives": 0, "verified": 2, "fixes_verified": 2, "dropped": 0, "cost_usd": 0.1414, "turns": 8}
+{"ts": "2026-09-24T00:24:50", "fixture": "ts-shop-clean", "model": "claude-opus-5", "seeded": 0, "found": 0, "false_positives": 0, "verified": 0, "fixes_verified": 0, "dropped": 0, "cost_usd": 0.0995, "turns": 6}

@@ -62,7 +62,9 @@ class Finding(BaseModel):
     file: str = Field(description="Repo-relative path of the buggy code.")
     line_start: int = Field(description="1-based first line of the buggy code in head.")
     line_end: int = Field(description="1-based last line of the buggy code in head.")
-    explanation: str = Field(description="What goes wrong, for which input, and why. Be concrete.")
+    explanation: str = Field(
+        description="What goes wrong, for which input, and why, in at most 4 sentences. Be concrete."
+    )
     confidence: float = Field(ge=0, le=1, description="Your confidence that this is a real bug.")
     suggested_fix: str | None = Field(None, description="One or two sentences describing the fix.")
     fix_edits: list[FixEdit] = Field(
