@@ -147,7 +147,7 @@ it('does not let customers refund', () => {
 """
 
 
-async def test_fix_judged_per_case_when_one_test_covers_two_bugs(env):
+async def test_fix_must_pass_every_case_unless_another_finding_cites_the_test(env):
     from pr_review_agent.fixes import plan_edits
     from pr_review_agent.models import FixEdit
 
@@ -166,6 +166,10 @@ async def test_fix_judged_per_case_when_one_test_covers_two_bugs(env):
             )
         ],
     )
+    # Only the pagination bug is fixed; the refund case still fails, so the fix isn't confirmed...
     result = await runner.check_fix(ws.head, shop, changes, [COMBINED])
+    assert not result.ok and "still fails with the fix in 1 of 2 failing cases" in result.notes[0]
+    # ...unless another finding cites the same test, which accounts for the case still failing.
+    result = await runner.check_fix(ws.head, shop, changes, [COMBINED], shared_repros=frozenset({COMBINED}))
     assert result.ok, result.notes
-    assert "1 of 2 failing cases" in result.notes[0]
+    assert "for 1 of 2 failing cases" in result.notes[0] and "3 runs in a row" in result.notes[0]

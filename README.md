@@ -42,14 +42,22 @@ The agent gets `Read`, `Grep`, `Glob` and five custom tools: `run_repro_test`, `
 For each bug it proves, the agent proposes the smallest fix as exact search/replace edits and tries it with
 `check_fix`. After the agent finishes, pr-review checks the fix again, independently:
 
-1. The edits must apply cleanly, touch only source files in the bug's project, and never touch tests.
-2. With the patch applied, the agent's failing test must **pass**.
-3. The project's existing test suite must not gain any failures.
-4. The static checks (`tsc`, ruff, …) must not report new problems in the changed files.
+1. The edits must apply cleanly and touch only source files in the bug's project. They can never touch tests,
+   test helpers, fixtures, mocks, or build, lint and test configuration (`tsconfig.json`, `vitest.config.ts`,
+   `pyproject.toml`, …), because changing those could make the checks pass without fixing anything.
+2. With the patch applied, every failing case of the agent's test must **pass**, three runs in a row, so a flaky
+   test can't pass by chance. Cases that only failed because the test itself is broken (a bad import, a missing
+   fixture) don't count. If two findings cite the same test, each fix only has to fix its own cases.
+3. The test's cases that already passed must still pass, and the project's existing test suite must not gain
+   any failures.
+4. The static checks (`tsc`, ruff, …) must not report anything new anywhere in the project, since a changed
+   signature can break callers in other files. When a finding rests on a diagnostic, that diagnostic must go away.
 
-The files are always restored afterwards. A fix that passes all four is **Verified**. One that applies but had no
+The files are always restored afterwards, and scan chunks that run at the same time never see each other's
+trial fixes. A fix that passes all four is **Verified**. One that applies but had no
 test to check it against is **Not tested**. One that fails a check is kept only in the dashboard, marked
 **Failed its checks**, and never posted to GitHub. Every patch is a normal unified diff you can `git apply`.
+When a re-run takes a scan chunk from the cache, its fixes are checked again if a file they change is different now.
 
 ## Safety model
 
@@ -137,7 +145,9 @@ one. The **Guide** page in the sidebar walks through everything below.
     that line.
   - **Open in VS Code** (or Cursor) jumps to the line in your editor.
 - **Apply a fix.** **Apply to my repo** checks the patch against your working copy, then tells you whether it
-  applies, is already applied, or no longer fits because the code changed. **Apply fix** writes it (nothing is
+  applies, is already applied, or no longer fits because the code changed. If it still applies but a file it
+  changes differs from the code the fix was checked against, you get a warning and the button reads
+  **Apply anyway**. **Apply fix** writes it (nothing is
   committed) and **Undo fix** takes it out again. **Copy patch** and **Download patch** are there too.
 - **Triage.** Mark each bug **Open**, **Fixed**, **Won't fix** or **False alarm**, and add a note. Filter with
   **Open only**. Decisions are kept per repository and carry over to later runs. Applying a fix marks the bug

@@ -14,6 +14,11 @@ _TSC_LINE = re.compile(
     r"^(?P<file>[^\s(][^(]*)\((?P<line>\d+),(?P<col>\d+)\): (?P<sev>error|warning) (?P<code>TS\d+): (?P<msg>.*)$"
 )
 _STATUS = {"passed": "passed", "failed": "failed", "skipped": "skipped", "pending": "skipped", "todo": "skipped"}
+# vitest.config.ts, eslint.config.js, vitest.workspace.ts, ... at the project root. (Deeper *.config.ts
+# files are usually app code, e.g. Angular's app.config.ts.)
+_ROOT_CONFIG = re.compile(r"\.(config|workspace)\.[cm]?[jt]sx?$")
+# vitest.setup.ts, setupTests.ts, test-utils.tsx, ... anywhere.
+_TEST_SETUP = re.compile(r"(\.setup|^setup-?tests?|^tests?-?setup|^test-?utils?)\.[cm]?[jt]sx?$", re.IGNORECASE)
 
 
 class TypeScriptAdapter(LanguageAdapter):
@@ -92,6 +97,10 @@ class TypeScriptAdapter(LanguageAdapter):
 
     def is_test_file(self, path: str) -> bool:
         return bool(re.search(r"(\.|/)(test|spec)\.[cm]?[jt]sx?$", path)) or "/__tests__/" in path
+
+    def is_tooling_file(self, rel: str) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        return bool(_TEST_SETUP.search(name)) or ("/" not in rel and bool(_ROOT_CONFIG.search(name)))
 
 
 def parse_tsc(output: str, paths: PathMap) -> list[Diagnostic]:

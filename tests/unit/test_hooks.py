@@ -92,3 +92,34 @@ def test_agent_sessions_are_lean(roots, repo_cfg):
     opts = build_options(ctx, Settings(), 2.0)
     assert opts.strict_mcp_config and opts.skills == [] and opts.setting_sources == []
     assert opts.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false" and opts.env["CLAUDE_CODE_DISABLE_CLAUDE_MDS"] == "1"
+
+
+async def test_reads_wait_while_another_chunk_has_the_file_patched(roots, repo_cfg):
+    import asyncio
+
+    from pr_review_agent.agent.hooks import wait_for_real_code
+    from pr_review_agent.fixes import FileChange, applied
+
+    head, base = roots
+    src = head / "backend/src/page.ts"
+    src.write_text("real\n")
+    ctx = ReviewContext(mode="scan", ws=Workspace(root=head.parent, head=head, head_sha="x"), cfg=repo_cfg, runner=None)
+    guard = path_guard(ctx).hooks[0]
+    seen = []
+
+    async def fix_check():
+        with applied(head, [FileChange("backend/src/page.ts", "real\n", "trial fix\n")]):
+            await asyncio.sleep(0.5)
+
+    async def agent_read():
+        await asyncio.sleep(0.1)  # starts while the fix is applied
+        await guard(
+            {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": str(src)}}, "id", None
+        )
+        seen.append(src.read_text())
+
+    await asyncio.gather(fix_check(), agent_read())
+    assert seen == ["real\n"]
+    with applied(head, [FileChange("backend/src/page.ts", "real\n", "trial fix\n")]):
+        assert not await wait_for_real_code([head / "backend"], wait_s=0.3)  # a directory under Grep
+    assert await wait_for_real_code([head / "backend"], wait_s=0.3)

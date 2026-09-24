@@ -11,6 +11,7 @@ from ..adapters import adapter_for
 from ..analyzers.tests import SuiteResult
 from ..config import ProjectConfig, RepoConfig
 from ..diff import PrDiff
+from ..fixes import real_text
 from ..models import Diagnostic
 from ..runner import ProjectRunner
 from ..workspace import Workspace
@@ -41,7 +42,7 @@ class ReviewContext:
         path = self.ws.head / rel
         try:
             if path.is_file() and path.stat().st_size <= MAX_SOURCE_BYTES:
-                self.sources[rel] = path.read_text(errors="replace")
+                self.sources[rel] = real_text(path)  # not another scan chunk's trial fix
         except OSError:
             pass
 

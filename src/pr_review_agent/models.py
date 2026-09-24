@@ -46,7 +46,10 @@ class Evidence(BaseModel):
 
 
 class FixEdit(BaseModel):
-    file: str = Field(description="Repo-relative path of the source file to change (never a test file).")
+    file: str = Field(
+        description="Repo-relative path of the source file to change. Never a test, test helper, fixture, "
+        "mock or build/test configuration file."
+    )
     old: str = Field(
         description="Exact text currently in the file, copied verbatim with its indentation. It must occur "
         "exactly once, so include enough surrounding lines to make it unique."
@@ -96,8 +99,10 @@ class Diagnostic(BaseModel):
 
     def identity(self) -> tuple[str, str | None, str, str]:
         """Line-independent identity, used to tell new diagnostics from ones that already existed
-        on base (line numbers shift between base and head, so they can't be part of the key)."""
-        return (self.tool, self.rule, self.file, re.sub(r"\s+", " ", self.message).strip())
+        on base (line numbers shift between base and head, so they can't be part of the key, nor the
+        "defined on line 12" some messages contain)."""
+        message = re.sub(r"\bline \d+", "line N", re.sub(r"\s+", " ", self.message)).strip()
+        return (self.tool, self.rule, self.file, message)
 
 
 TestStatus = Literal["passed", "failed", "skipped", "error"]
@@ -145,7 +150,8 @@ FixStatus = Literal["verified", "unverified", "failed"]
 class FixResult(BaseModel):
     """The agent's proposed fix after we checked it.
 
-    verified: applied cleanly, the failing test(s) now pass, no existing test or static check regressed.
+    verified: applied cleanly, every genuinely failing repro case now passes (three runs in a row), no
+        existing test broke and no static check anywhere in the project reports something new.
     unverified: applies cleanly, but there was no executable evidence to check it against.
     failed: applies, but a check failed (see notes); shown for transparency, never posted as a fix.
     """
@@ -154,6 +160,8 @@ class FixResult(BaseModel):
     patch: str  # unified diff, `git apply`-able from the repo root
     notes: list[str] = Field(default_factory=list)
     patched: dict[str, str] = Field(default_factory=dict)  # file -> full content with the fix, for the UI
+    # file -> sha256 of the code the fix was checked against, to notice when that code has changed since.
+    source_hashes: dict[str, str] = Field(default_factory=dict)
 
 
 class CodeExcerpt(BaseModel):

@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import HookMatcher
 
 from ..config import matches_any
+from ..fixes import is_patched
 from .context import ReviewContext
 
 GUARDED_TOOLS = "Read|Grep|Glob"
 MAX_READ_LINES = 400  # a whole 3,800-line file per Read was the biggest single token cost
+PATCH_WAIT_S = 45.0  # how long a Read/Grep waits for another chunk's fix check to restore the file
+HOOK_TIMEOUT_S = 90  # the SDK's default (60 s) would cut the wait short
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -67,6 +72,18 @@ def _cap_read(tool_input: dict[str, Any], cwd: Path) -> dict[str, Any]:
     }
 
 
+async def wait_for_real_code(targets: list[Path], wait_s: float = PATCH_WAIT_S) -> bool:
+    """Scan chunks share one checkout, and a fix check patches files in it for a while. Wait until none
+    of `targets` (files or directories) is patched, so the agent reads the real code rather than another
+    chunk's trial fix. False if something is still patched when the wait runs out."""
+    deadline = time.monotonic() + wait_s
+    while any(is_patched(t) for t in targets):
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(0.2)
+    return True
+
+
 def path_guard(ctx: ReviewContext) -> HookMatcher:
     roots = ctx.allowed_roots
     cwd = ctx.ws.head.resolve()
@@ -79,13 +96,24 @@ def path_guard(ctx: ReviewContext) -> HookMatcher:
         pattern = tool_input.get("pattern")
         if input_data.get("tool_name") == "Glob" and isinstance(pattern, str) and pattern.startswith(("/", "~")):
             candidates.append(pattern.split("*", 1)[0] or "/")
-        for raw in candidates:
-            if isinstance(raw, str) and raw:
-                reason = check_path(raw, cwd, roots, ctx.cfg.ignore)
-                if reason:
-                    return _deny(reason)
-        if input_data.get("tool_name") == "Read":
+        paths = [raw for raw in candidates if isinstance(raw, str) and raw]
+        for raw in paths:
+            reason = check_path(raw, cwd, roots, ctx.cfg.ignore)
+            if reason:
+                return _deny(reason)
+        tool = input_data.get("tool_name")
+        if tool in ("Read", "Grep"):
+            targets = [p if (p := Path(raw).expanduser()).is_absolute() else cwd / p for raw in paths] or [cwd]
+            if not await wait_for_real_code(targets):
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "additionalContext": "A fix check had this code temporarily patched while you read it, so "
+                        "what you see may include a trial fix. Read it again before quoting it.",
+                    }
+                }
+        if tool == "Read":
             return _cap_read(tool_input, cwd)
         return {}
 
-    return HookMatcher(matcher=GUARDED_TOOLS, hooks=[guard])
+    return HookMatcher(matcher=GUARDED_TOOLS, hooks=[guard], timeout=HOOK_TIMEOUT_S)

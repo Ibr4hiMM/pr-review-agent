@@ -123,6 +123,11 @@ class PythonAdapter(LanguageAdapter):
         name = path.rsplit("/", 1)[-1]
         return name.startswith("test_") or name.endswith("_test.py") or name == "conftest.py"
 
+    def is_tooling_file(self, rel: str) -> bool:
+        name = rel.rsplit("/", 1)[-1]
+        # Packaging/task files at the root, and files the interpreter runs at startup.
+        return rel in ("setup.py", "noxfile.py") or name in ("sitecustomize.py", "usercustomize.py")
+
 
 def parse_ruff(output: str, paths: PathMap) -> list[Diagnostic]:
     start = output.find("[")

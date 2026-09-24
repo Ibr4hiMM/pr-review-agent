@@ -6,7 +6,7 @@ from pr_review_agent.agent.context import ReviewContext
 from pr_review_agent.analyzers.tests import SuiteResult
 from pr_review_agent.diff import parse_diff
 from pr_review_agent.models import Diagnostic, Evidence, Finding, ReviewResult, TestCase, TestRun
-from pr_review_agent.verify import snippet_matches, verify_result
+from pr_review_agent.verify import recheck_stale_fixes, snippet_matches, verify_result
 from pr_review_agent.workspace import Workspace
 
 FAIL = TestRun(exit_code=1, cases=[TestCase(id="t", status="failed", message="AssertionError: expected 9 to be 10")])
@@ -31,10 +31,13 @@ class FakeRunner:
         self.calls.append((root.name, code))
         return self.results[(root.name, code)], "backend/test/__pr_review__/repro_x.test.ts"
 
-    async def check_fix(self, root, p, changes, repro, baseline=None, must_pass=None):
+    async def check_fix(
+        self, root, p, changes, repro, baseline=None, must_pass=None, must_clear=None, shared_repros=()
+    ):
         from pr_review_agent.runner import FixCheck
 
         self.fix_calls.append((changes, repro))
+        self.fix_kwargs = {"must_clear": must_clear, "shared_repros": shared_repros}
         ok = "Math.ceil" in changes[0].patched
         return FixCheck(
             ok=ok,
@@ -239,3 +242,73 @@ async def test_fix_is_checked_against_the_repro(tmp_path, repo_cfg):
     )
     [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[wrong]))).kept
     assert v.fix is None and any("fix discarded" in n for n in v.notes)
+
+
+async def test_fix_for_static_finding_must_clear_the_cited_diagnostic(tmp_path, repo_cfg):
+    from pr_review_agent.models import FixEdit
+
+    diag = Diagnostic(tool="tsc", rule="TS2532", file="backend/src/page.ts", line=2, message="possibly undefined")
+    ctx = make_ctx(tmp_path, repo_cfg, {}, mode="scan", diagnostics=[diag])
+    f = finding(
+        Evidence(kind="static", tool="tsc", rule="TS2532", file="backend/src/page.ts", line=2),
+        fix_edits=[FixEdit(file="backend/src/page.ts", old="Math.floor", new="Math.ceil")],
+    )
+    [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[f]))).kept
+    assert ctx.runner.fix_kwargs["must_clear"] == [diag]
+    assert v.fix.status == "unverified"  # a vanished diagnostic can fail a fix, but only a test verifies one
+
+
+async def test_repro_cited_by_two_findings_may_pass_partially(tmp_path, repo_cfg):
+    from pr_review_agent.models import FixEdit
+
+    ctx = make_ctx(tmp_path, repo_cfg, {("head", "T"): FAIL, ("head", "U"): FAIL}, mode="scan")
+    fix = [FixEdit(file="backend/src/page.ts", old="Math.floor", new="Math.ceil")]
+    shared = Evidence(kind="failing_test", test_code="T")
+    findings = [
+        finding(shared, fix_edits=fix),
+        finding(shared, Evidence(kind="failing_test", test_code="U"), title="other bug", line_start=1, line_end=1),
+    ]
+    await verify_result(ctx, ReviewResult(summary="", findings=findings))
+    assert ctx.runner.fix_kwargs["shared_repros"] == frozenset({"T"})
+
+    # A dropped duplicate of the same bug doesn't account for cases the fix leaves failing.
+    ctx = make_ctx(tmp_path, repo_cfg, {("head", "T"): FAIL}, mode="scan")
+    duplicate = finding(shared, title="lastPage drops the final partial page!")
+    report = await verify_result(ctx, ReviewResult(summary="", findings=[finding(shared, fix_edits=fix), duplicate]))
+    assert [r for _, r in report.dropped] == ["duplicate"]
+    assert ctx.runner.fix_kwargs["shared_repros"] == frozenset()
+
+
+async def _verified_with_fix(tmp_path, repo_cfg):
+    from pr_review_agent.models import FixEdit
+
+    ctx = make_ctx(tmp_path, repo_cfg, {("head", "T"): FAIL}, mode="scan")
+    f = finding(
+        Evidence(kind="failing_test", test_code="T"),
+        fix_edits=[FixEdit(file="backend/src/page.ts", old="Math.floor", new="Math.ceil")],
+    )
+    [v] = (await verify_result(ctx, ReviewResult(summary="", findings=[f]))).kept
+    return ctx, v
+
+
+async def test_verified_fix_records_the_code_it_was_checked_against(tmp_path, repo_cfg):
+    import hashlib
+
+    _, v = await _verified_with_fix(tmp_path, repo_cfg)
+    assert v.fix.source_hashes == {"backend/src/page.ts": hashlib.sha256(SRC.encode()).hexdigest()}
+
+
+async def test_cached_fix_is_checked_again_only_when_its_code_changed(tmp_path, repo_cfg):
+    ctx, v = await _verified_with_fix(tmp_path, repo_cfg)
+    calls = len(ctx.runner.fix_calls)
+    assert not await recheck_stale_fixes(ctx, [v])  # unchanged: nothing to do
+    assert len(ctx.runner.fix_calls) == calls
+
+    page = tmp_path / "head/backend/src/page.ts"
+    page.write_text(SRC.replace("size)", "size) // size is never 0"))
+    assert await recheck_stale_fixes(ctx, [v])
+    assert len(ctx.runner.fix_calls) == calls + 1 and v.fix.status == "verified"
+
+    page.write_text(SRC.replace("Math.floor", "Math.trunc"))  # the fix's `old` text is gone
+    assert await recheck_stale_fixes(ctx, [v])
+    assert v.fix is None and any("checked again because the code changed" in n for n in v.notes)

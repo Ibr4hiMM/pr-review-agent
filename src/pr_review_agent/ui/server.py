@@ -351,7 +351,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if not path:
             raise RepoError("Choose the folder of your local copy of this repository.")
         root = repo_root(path)
-        result = {"check": fix_state, "apply": apply_fix, "undo": undo_fix}[action](str(root), finding.fix.patch)
+        result = {"check": fix_state, "apply": apply_fix, "undo": undo_fix}[action](
+            str(root), finding.fix.patch, finding.fix.source_hashes
+        )
         self.app.store.remember_repo(str(root), repo_slug(root) or (record.repo if "/" in record.repo else None))
         if action == "apply":
             self.app.store.set_triage(record.repo, fp, "fixed")  # keeps any note the person wrote

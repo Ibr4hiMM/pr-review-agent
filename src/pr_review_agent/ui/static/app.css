@@ -579,6 +579,7 @@ code, pre, .row-where, .where, .path {
 .apply-result.is-applies { color: var(--green); }
 .apply-result.is-applied { color: var(--green); }
 .apply-result.is-conflict { color: var(--red); }
+.apply-result.is-warn { color: var(--amber); }
 
 /* ---------- job page ---------- */
 

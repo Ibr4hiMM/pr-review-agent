@@ -458,6 +458,9 @@ function failureLine(output) {
   return lines.find((l) => /error|expected|assert/i.test(l)) || lines[1] || lines[0] || "";
 }
 
+// Fix-check notes that explain why a fix failed (see runner.py).
+const FAILED_NOTE = /still fails|fails in new places|flaky|breaks|introduces|did not run|could not|still reported/;
+
 function trailSteps(run, v) {
   const f = v.finding;
   const steps = [];
@@ -484,15 +487,16 @@ function trailSteps(run, v) {
   } else if (fix.status === "verified") {
     const passNote = fix.notes.find((n) => /passes with the fix|pass again/.test(n)) || "";
     const partial = passNote.match(/for (\d+) of (\d+) failing cases/);
+    const runs = passNote.match(/\((\d+) runs in a row\)/);
     steps.push({ state: "pass", title: "Passes with the fix",
-      detail: partial ? `${partial[1]} of ${partial[2]} failing test cases pass; the others test a different bug.`
-        : passNote ? "The same test passes once the patch is applied." : "The regressed test passes again." });
+      detail: partial ? `${partial[1]} of ${partial[2]} failing test cases pass; the others belong to another finding that cites the same test.`
+        : passNote ? `The same test passes once the patch is applied${runs ? `, ${runs[1]} runs in a row` : ""}.` : "The regressed test passes again." });
     const suite = fix.notes.find((n) => n.startsWith("existing tests still pass"));
     if (suite) steps.push({ state: "pass", title: "Existing tests still pass", detail: suite.replace(/^existing tests still pass\s*/, "").replace(/[()]/g, "") });
   } else if (fix.status === "unverified") {
     steps.push({ state: "warn", title: "Fix applies cleanly", detail: "No test could confirm it, so review the patch yourself." });
   } else {
-    steps.push({ state: "fail", title: "Proposed fix failed its checks", detail: fix.notes.find((n) => /still fails|breaks|introduces|did not run/.test(n)) || fix.notes[0] || "" });
+    steps.push({ state: "fail", title: "Proposed fix failed its checks", detail: fix.notes.find((n) => FAILED_NOTE.test(n)) || fix.notes[0] || "" });
   }
   return steps;
 }
@@ -701,16 +705,18 @@ function applyPanel(run, v) {
   const pathInput = h("input", { class: "input", type: "text", value: ap.path || "", placeholder: "/Users/you/code/my-app", "aria-label": "Repository folder",
     oninput: (e) => { ap.path = e.target.value; ap.result = null; } });
   const r = ap.result;
+  // The patch applies, but a file it changes differs from the code the fix was checked against.
+  const drifted = Boolean(r && r.state === "applies" && r.changed_since_run && r.changed_since_run.length);
   return h("div", { class: "apply-panel", role: "region", "aria-label": "Apply the fix" },
     h("label", { class: "field-label" }, "Your local copy of the repository", pathInput),
     h("p", { class: "hint" }, "The patch goes into your working copy only. Nothing is committed or pushed."),
     h("div", { class: "actions" },
       h("button", { class: "btn", type: "button", disabled: ap.busy || !ap.path, onclick: () => fixAction(run, v, "check") }, "Check"),
-      r && r.state === "applies" ? h("button", { class: "btn btn-primary", type: "button", disabled: ap.busy, onclick: () => fixAction(run, v, "apply") }, "Apply fix") : null,
+      r && r.state === "applies" ? h("button", { class: "btn btn-primary", type: "button", disabled: ap.busy, onclick: () => fixAction(run, v, "apply") }, drifted ? "Apply anyway" : "Apply fix") : null,
       r && r.state === "applied" ? h("button", { class: "btn", type: "button", disabled: ap.busy, onclick: () => fixAction(run, v, "undo") }, "Undo fix") : null,
       h("button", { class: "btn btn-quiet", type: "button", onclick: () => { ap.open = false; renderDetail(false); } }, "Close"),
       ap.busy ? h("span", { class: "hint" }, "Working…") : null),
-    r ? h("p", { class: `apply-result is-${r.state}`, role: "status" }, inline(r.detail)) : null,
+    r ? h("p", { class: `apply-result is-${drifted ? "warn" : r.state}`, role: "status" }, inline(r.detail)) : null,
     ap.error ? h("p", { class: "apply-result is-conflict", role: "alert" }, ap.error) : null);
 }
 
@@ -741,7 +747,7 @@ function fixSection(run, v) {
     h("p", { class: `fix-status fix-${fix.status}` }, h("strong", {}, status[0]), h("span", { class: "hint" }, status[1])),
     f.suggested_fix ? prose(f.suggested_fix) : null,
     h("div", { class: "fix-diff" }, diffBlock(fix.patch)),
-    h("ul", { class: "checks" }, fix.notes.map((n) => h("li", { class: /still fails|breaks|introduces|did not run|could not/.test(n) ? "bad" : "" }, n))),
+    h("ul", { class: "checks" }, fix.notes.map((n) => h("li", { class: FAILED_NOTE.test(n) ? "bad" : "" }, n))),
     h("div", { class: "actions" },
       fix.status !== "failed" ? h("button", { class: "btn btn-primary", type: "button", "aria-expanded": String(Boolean(ap.open)), onclick: toggleApply }, "Apply to my repo") : null,
       fixFile && run.sources && run.sources[fixFile] !== undefined ? h("button", { class: "btn", type: "button", onclick: () => openInViewer(fixFile, null, "fixed") }, "Preview in the file") : null,
@@ -1446,7 +1452,7 @@ async function renderGuide() {
         h("li", {}, "In the Fix section, ", h("strong", {}, "Preview in the file"), " opens the fixed file directly.")),
       h("div", { class: "pref" }, h("span", { class: "field-label" }, "Open files in"), editorPick)]],
     ["Apply a fix", [
-      h("p", {}, "In the Fix section, click Apply to my repo. The dashboard checks the patch against your working copy and tells you whether it applies, is already applied, or no longer fits because the code changed. Click Apply fix to write it, then review it with git diff. Undo fix takes it out again."),
+      h("p", {}, "In the Fix section, click Apply to my repo. The dashboard checks the patch against your working copy and tells you whether it applies, is already applied, or no longer fits because the code changed. If it still applies but a file it changes is different from the code the fix was checked against, you get a warning first. Click Apply fix to write it, then review it with git diff. Undo fix takes it out again."),
       h("p", {}, "You can also copy or download the patch and apply it yourself:"), cmd("git apply fix-<id>.patch")]],
     ["Triage", [
       h("p", {}, "Mark each bug Open, Fixed, Won't fix or False alarm, and add a note. Applying a fix marks it Fixed. Use Open only in the filters to see what's left. Decisions carry over to later runs of the same repository.")]],

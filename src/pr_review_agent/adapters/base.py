@@ -9,10 +9,29 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ProjectConfig
-from ..models import Diagnostic, TestRun
+from ..models import Diagnostic, TestCase, TestRun
 from ..sandbox import ExecResult
 
 REPORT_DIR = ".pr-review"  # project-relative scratch dir for report files
+
+# Directories that hold tests or what tests lean on (fakes, fixtures, mocks). Fixes may not touch them.
+TEST_SUPPORT_DIRS = frozenset(
+    {
+        "test",
+        "tests",
+        "__tests__",
+        "__mocks__",
+        "__fixtures__",
+        "fixtures",
+        "spec",
+        "specs",
+        "e2e",
+        "testing",
+        "testdata",
+        "test_utils",
+        "testutils",
+    }
+)
 
 
 @dataclass
@@ -86,6 +105,31 @@ class LanguageAdapter(ABC):
     def is_test_file(self, path: str) -> bool:
         return False
 
+    def is_tooling_file(self, rel: str) -> bool:
+        """Build, lint or test configuration written in the language itself (e.g. vitest.config.ts).
+        `rel` is project-relative."""
+        return False
+
+    def fix_refusal(self, p: ProjectConfig, path: str) -> str | None:
+        """Why a fix may not change `path` (repo-relative), or None if it may. Fixes change source code
+        only: a fix that edits a test, a test helper or the config the checks run with could pass every
+        check without fixing anything."""
+        rel = p.rel(path)
+        parts = rel.split("/")
+        name = parts[-1]
+        repro_dir = (p.repro_dir or "").strip("/").removeprefix("./")
+        if (
+            self.is_test_file(path)
+            or any(d in TEST_SUPPORT_DIRS for d in parts[:-1])
+            or (repro_dir and rel.startswith(repro_dir + "/"))
+        ):
+            return "fixes may not change tests or test helpers"
+        if any(part.startswith(".") for part in parts) or not name.endswith(self.source_exts) or name.endswith(".d.ts"):
+            return f"fixes may only change source files ({', '.join(self.source_exts)})"
+        if self.is_tooling_file(rel):
+            return "fixes may not change build, lint or test configuration"
+        return None
+
 
 # Failures that mean the *test* is broken rather than the code under test.
 BROKEN_TEST_MARKERS = (
@@ -103,6 +147,12 @@ BROKEN_TEST_MARKERS = (
 )
 
 
+def is_broken_case(case: TestCase) -> bool:
+    """The case failed because the test itself is broken (bad import, missing fixture, ...)."""
+    msg = case.message or ""
+    return any(m in msg for m in BROKEN_TEST_MARKERS)
+
+
 def broken_test_reason(run: TestRun) -> str | None:
     """Why a failing repro doesn't count as evidence, or None if the failure looks genuine."""
     if run.timed_out:
@@ -112,12 +162,8 @@ def broken_test_reason(run: TestRun) -> str | None:
     if not run.cases:
         return "no tests were collected"
     failed = run.failed
-    if not failed:
-        return None
-    for case in failed:
-        msg = case.message or ""
-        if not any(m in msg for m in BROKEN_TEST_MARKERS):
-            return None  # at least one genuine assertion/runtime failure
+    if not failed or not all(is_broken_case(c) for c in failed):
+        return None  # at least one genuine assertion/runtime failure
     return "every failure is an import/name/syntax error in the test itself"
 
 

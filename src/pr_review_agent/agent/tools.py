@@ -12,9 +12,9 @@ from typing import Any
 from claude_agent_sdk import McpSdkServerConfig, ToolAnnotations, create_sdk_mcp_server, tool
 
 from ..adapters import adapter_for
-from ..adapters.base import broken_test_reason
+from ..adapters.base import broken_test_reason, is_broken_case
 from ..files import iter_source_files
-from ..fixes import EditError, plan_edits, unified_patch
+from ..fixes import EditError, plan_edits, real_text, unified_patch
 from ..models import FixEdit, TestRun
 from .context import ReviewContext
 
@@ -88,15 +88,24 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
                 "Failure output (head):\n"
                 + (failure_excerpt(ctx, head) if head.failed else ctx.clean(head.load_error or "", max_lines=30))
             )
+        broken = [c for c in head.failed if is_broken_case(c)]
+        if ok and broken:
+            lines.append(
+                f"{len(broken)} case(s) failed only because the test itself is broken "
+                f"({', '.join(c.id.split('::')[-1] for c in broken[:3])}). They prove nothing and a fix can't "
+                "make them pass: fix or remove them before citing this test."
+            )
         if ok:
             lines.append("Include this exact test_code as `failing_test` evidence.")
         return _text("\n".join(lines))
 
     @tool(
         "check_fix",
-        "Try a fix for a bug you proved. Applies exact search/replace edits to the head checkout, runs your "
-        "failing test (it must now PASS), the project's existing tests (none may start failing) and its static "
-        "checks (no new errors), then restores the files. Put edits that pass into the finding's fix_edits.",
+        "Try a fix for a bug you proved. Applies exact search/replace edits to source files in the head "
+        "checkout (never tests, test helpers or configuration), runs your failing test (every failing case must "
+        "now PASS, three runs in a row), the project's existing tests (none may start failing) and its static "
+        "checks (nothing new anywhere in the project), then restores the files. Put edits that pass into the "
+        "finding's fix_edits.",
         {
             "type": "object",
             "properties": {
@@ -227,7 +236,7 @@ def build_server(ctx: ReviewContext) -> McpSdkServerConfig:
         for p in projects:
             for rel in iter_source_files(ctx.ws.head, ctx.cfg, p):
                 try:
-                    lines = (ctx.ws.head / rel).read_text(errors="replace").splitlines()
+                    lines = real_text(ctx.ws.head / rel).splitlines()
                 except OSError:
                     continue
                 hits += [f"{rel}:{i}: {line.strip()[:200]}" for i, line in enumerate(lines, 1) if pattern.search(line)]

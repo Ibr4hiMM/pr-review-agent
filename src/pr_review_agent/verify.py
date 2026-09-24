@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,10 +20,11 @@ from .adapters import adapter_for
 from .adapters.base import broken_test_reason
 from .agent.context import ReviewContext
 from .agent.tools import failure_excerpt, repro_verdict
-from .fixes import EditError, plan_edits, unified_patch
+from .fixes import EditError, content_hash, display_text, plan_edits, real_bytes, real_text, unified_patch
 from .models import (
     SEVERITY_ORDER,
     CodeExcerpt,
+    Diagnostic,
     Evidence,
     Finding,
     FixResult,
@@ -54,7 +57,7 @@ def _safe_rel(path: str) -> str | None:
 
 def snippet_matches(root: Path, file: str, line: int, snippet: str, slack: int = LINE_SLACK) -> bool:
     try:
-        lines = (root / file).read_text(errors="replace").splitlines()
+        lines = real_text(root / file).splitlines()
     except OSError:
         return False
     want = _norm(snippet)
@@ -94,7 +97,7 @@ def code_excerpt(
     root: Path, file: str, start: int, end: int, context: int = 10, max_lines: int = 70
 ) -> CodeExcerpt | None:
     try:
-        lines = (root / file).read_text(errors="replace").splitlines()
+        lines = real_text(root / file).splitlines()
     except OSError:
         return None
     lo = max(1, start - context)
@@ -102,7 +105,28 @@ def code_excerpt(
     return CodeExcerpt(file=file, start=lo, lines=lines[lo - 1 : hi], highlight=(start, end))
 
 
-async def check_proposed_fix(ctx: ReviewContext, f: Finding, valid: list[Evidence]) -> FixResult | str:
+def cited_diagnostics(ctx: ReviewContext, evidence: list[Evidence]) -> list[Diagnostic]:
+    """The diagnostics behind verified `static` evidence (verification pins each to its diagnostic)."""
+    return [
+        d
+        for ev in evidence
+        if ev.kind == "static"
+        for d in ctx.diagnostics
+        if (d.file, d.line, d.tool, d.rule) == (ev.file, ev.line, ev.tool, ev.rule)
+    ]
+
+
+def shared_repro_tests(findings: Iterable[Finding | VerifiedFinding]) -> frozenset[str]:
+    """Repro tests cited by more than one finding. A fix for one of them may leave the others' cases failing."""
+    counts: Counter[str] = Counter()
+    for f in findings:
+        counts.update({ev.test_code for ev in f.evidence if ev.kind == "failing_test" and ev.test_code})
+    return frozenset(code for code, n in counts.items() if n > 1)
+
+
+async def check_proposed_fix(
+    ctx: ReviewContext, f: Finding, valid: list[Evidence], shared: frozenset[str] = frozenset()
+) -> FixResult | str:
     """Independently re-check the agent's fix. Returns a FixResult, or a reason the fix was discarded."""
     try:
         changes = plan_edits(ctx.ws.head, ctx.cfg, f.fix_edits)
@@ -119,7 +143,16 @@ async def check_proposed_fix(ctx: ReviewContext, f: Finding, valid: list[Evidenc
     known = {c.id for c in suite.head.cases} if suite and suite.head else set()
     must_pass = [k for t in regressed for k in known if k == t or k.endswith(t) or t.endswith(k)]
     try:
-        check = await ctx.runner.check_fix(ctx.ws.head, p, changes, repro, suite.head if suite else None, must_pass)
+        check = await ctx.runner.check_fix(
+            ctx.ws.head,
+            p,
+            changes,
+            repro,
+            suite.head if suite else None,
+            must_pass,
+            must_clear=cited_diagnostics(ctx, valid),
+            shared_repros=shared,
+        )
     except Exception as e:
         return f"proposed fix could not be checked: {e}"
     if not check.ok:
@@ -131,8 +164,38 @@ async def check_proposed_fix(ctx: ReviewContext, f: Finding, valid: list[Evidenc
     for c in changes:
         ctx.keep_source(c.file)
     return FixResult(
-        status=status, patch=unified_patch(changes), notes=check.notes, patched={c.file: c.patched for c in changes}
+        status=status,
+        patch=unified_patch(changes),
+        notes=check.notes,
+        patched={c.file: display_text(c.patched) for c in changes},
+        source_hashes={c.file: content_hash(c.original.encode()) for c in changes},
     )
+
+
+async def recheck_stale_fixes(ctx: ReviewContext, kept: list[VerifiedFinding]) -> bool:
+    """Cached findings' fixes were checked against the code as it was then, and a scan chunk's cache
+    only covers its own files. Check a fix again when a file it changes is different now. Returns
+    whether any finding changed."""
+    shared = shared_repro_tests(kept)
+    changed = False
+    for v in kept:
+        fix = v.fix
+        if fix is None or not v.finding.fix_edits:
+            continue
+        try:
+            now = {f: content_hash(real_bytes(ctx.ws.head / f)) for f in fix.patched}
+        except OSError:
+            now = {}
+        if fix.source_hashes and now == {f: fix.source_hashes.get(f) for f in fix.patched}:
+            continue
+        checked = await check_proposed_fix(ctx, v.finding, v.evidence, shared)
+        if isinstance(checked, str):
+            v.fix = None
+            v.notes.append(f"{checked} (checked again because the code changed since the cached run)")
+        else:
+            v.fix = checked
+        changed = True
+    return changed
 
 
 async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyReport:
@@ -154,7 +217,7 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
             report.dropped.append((f, f"{rel} is not in any enabled project"))
             continue
         f.file, f.project = rel, owner.name
-        n_lines = len((ctx.ws.head / rel).read_text(errors="replace").splitlines())
+        n_lines = len(real_text(ctx.ws.head / rel).splitlines())
         f.line_start = min(max(1, f.line_start), max(1, n_lines))
         f.line_end = min(max(f.line_start, f.line_end), max(1, n_lines))
 
@@ -241,13 +304,6 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
         for ev in valid:
             if ev.kind in ("code_reference", "static") and ev.file:
                 ctx.keep_source(ev.file)
-        fix = None
-        if f.fix_edits:
-            checked = await check_proposed_fix(ctx, f, valid)
-            if isinstance(checked, str):
-                notes.append(checked)
-            else:
-                fix = checked
         report.kept.append(
             VerifiedFinding(
                 finding=f,
@@ -256,10 +312,20 @@ async def verify_result(ctx: ReviewContext, result: ReviewResult) -> VerifyRepor
                 notes=notes,
                 pre_existing=pre_existing and not introduced,
                 evidence=valid,
-                fix=fix,
                 code=code_excerpt(ctx.ws.head, rel, f.line_start, f.line_end),
             )
         )
+
+    # Fixes are checked once every finding is settled, so "another finding cites this test" only counts
+    # findings that survived verification (not, say, a dropped duplicate of the same bug).
+    shared = shared_repro_tests(report.kept)
+    for v in report.kept:
+        if v.finding.fix_edits:
+            checked = await check_proposed_fix(ctx, v.finding, v.evidence, shared)
+            if isinstance(checked, str):
+                v.notes.append(checked)
+            else:
+                v.fix = checked
 
     report.kept.sort(
         key=lambda v: (v.tier != "verified", SEVERITY_ORDER[v.finding.severity], v.finding.file, v.finding.line_start)

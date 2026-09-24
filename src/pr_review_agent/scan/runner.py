@@ -19,7 +19,7 @@ from ..models import SEVERITY_ORDER, Finding, ReviewResult, VerifiedFinding
 from ..render import Stats, dropped_notes
 from ..runner import ProjectRunner
 from ..sandbox import Sandbox
-from ..verify import verify_result
+from ..verify import recheck_stale_fixes, verify_result
 from ..workspace import prepare_local_workspace, repo_slug
 from .planner import Chunk, plan_chunks
 
@@ -166,6 +166,9 @@ async def run_scan(
             cached = cache_dir / f"{key}.json"
             if cached.exists():
                 kept = [VerifiedFinding.model_validate(v) for v in json.loads(cached.read_text())]
+                # The cache key covers the chunk's files, but a fix may change others. Costs no API usage.
+                if await recheck_stale_fixes(ctx, kept):
+                    cached.write_text(json.dumps([v.model_dump(mode="json") for v in kept]))
                 out.kept.extend(kept)
                 out.chunks_done += 1
                 out.cached_chunks += 1

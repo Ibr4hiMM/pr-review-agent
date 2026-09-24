@@ -12,6 +12,7 @@ from urllib.parse import unquote, urlparse
 
 from ..adapters import adapter_for
 from ..config import CONFIG_FILE, load_repo_config
+from ..fixes import content_hash
 from ..workspace import GitError, git, repo_slug
 
 
@@ -99,18 +100,33 @@ def patch_files(patch: str) -> list[str]:
     return re.findall(r"^diff --git a/(\S+) b/", patch, re.MULTILINE)
 
 
-def fix_state(path: str, patch: str) -> dict[str, Any]:
-    """Would the patch apply to the working copy right now?"""
+def changed_since_run(root: Path, source_hashes: dict[str, str]) -> list[str]:
+    """Files whose working-copy contents differ from the code the fix was checked against."""
+    changed = []
+    for file, digest in source_hashes.items():
+        try:
+            if content_hash((root / file).read_bytes()) != digest:
+                changed.append(file)
+        except OSError:
+            changed.append(file)
+    return changed
+
+
+def fix_state(path: str, patch: str, source_hashes: dict[str, str] | None = None) -> dict[str, Any]:
+    """Would the patch apply to the working copy right now? A patch can still apply after the code
+    around it changed, but then it was checked against different code: `changed_since_run` lists those files."""
     root = repo_root(path)
     files = patch_files(patch)
     try:
         git(["apply", "--check", "-"], cwd=root, input=patch)
-        return {
-            "state": "applies",
-            "files": files,
-            "repo": str(root),
-            "detail": f"The patch applies cleanly to {len(files)} file(s) in your working copy.",
-        }
+        changed = changed_since_run(root, source_hashes or {})
+        detail = f"The patch applies cleanly to {len(files)} file(s) in your working copy."
+        if changed:
+            detail = (
+                f"The patch applies, but {', '.join(changed)} changed since this run, so the fix was checked "
+                "against different code. Read the patch before applying it, or run a new scan to check it again."
+            )
+        return {"state": "applies", "files": files, "repo": str(root), "detail": detail, "changed_since_run": changed}
     except GitError as forward:
         try:
             git(["apply", "--check", "--reverse", "-"], cwd=root, input=patch)
@@ -131,20 +147,21 @@ def fix_state(path: str, patch: str) -> dict[str, Any]:
             }
 
 
-def apply_fix(path: str, patch: str) -> dict[str, Any]:
-    state = fix_state(path, patch)
+def apply_fix(path: str, patch: str, source_hashes: dict[str, str] | None = None) -> dict[str, Any]:
+    state = fix_state(path, patch, source_hashes)
     if state["state"] != "applies":
         raise RepoError(state["detail"])
     git(["apply", "-"], cwd=Path(state["repo"]), input=patch)
     return {
         **state,
         "state": "applied",
+        "changed_since_run": [],
         "detail": f"Applied to {', '.join(state['files'])}. Review it with `git diff`; nothing was committed.",
     }
 
 
-def undo_fix(path: str, patch: str) -> dict[str, Any]:
-    state = fix_state(path, patch)
+def undo_fix(path: str, patch: str, source_hashes: dict[str, str] | None = None) -> dict[str, Any]:
+    state = fix_state(path, patch, source_hashes)
     if state["state"] != "applied":
         raise RepoError("The fix isn't applied in your working copy, so there's nothing to undo.")
     git(["apply", "--reverse", "-"], cwd=Path(state["repo"]), input=patch)

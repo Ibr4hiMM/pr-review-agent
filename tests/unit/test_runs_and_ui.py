@@ -9,7 +9,7 @@ import urllib.request
 import pytest
 
 from pr_review_agent.config import Settings
-from pr_review_agent.fixes import plan_edits, unified_patch
+from pr_review_agent.fixes import content_hash, plan_edits, unified_patch
 from pr_review_agent.models import Evidence, Finding, FixEdit, FixResult, VerifiedFinding
 from pr_review_agent.render import Stats
 from pr_review_agent.runs import list_runs, load_run, new_run, save_run
@@ -86,7 +86,12 @@ def server(tmp_path, repo):
 
     cfg = RepoConfig(projects=[ProjectConfig(name="shop", path="shop", language="typescript")])
     changes = plan_edits(repo, cfg, [FixEdit(file="shop/src/page.ts", old="Math.floor", new="Math.ceil")])
-    fix = FixResult(status="verified", patch=unified_patch(changes), patched={c.file: c.patched for c in changes})
+    fix = FixResult(
+        status="verified",
+        patch=unified_patch(changes),
+        patched={c.file: c.patched for c in changes},
+        source_hashes={c.file: content_hash(c.original.encode()) for c in changes},
+    )
     runs = tmp_path / "runs"
     rec = new_run(
         "review-local",
@@ -182,7 +187,8 @@ def test_triage_is_saved_and_returned(server):
 def test_fix_check_apply_undo_on_a_real_repo(server):
     rec, repo = server["rec"], server["repo"]
     body = {"run_id": rec.id, "fp": "abcdef123456"}
-    assert call(server, "/api/fix/check", body)[2]["state"] == "applies"
+    check = call(server, "/api/fix/check", body)[2]
+    assert check["state"] == "applies" and check["changed_since_run"] == []
     status, _, result = call(server, "/api/fix/apply", body)
     assert status == 200 and result["state"] == "applied"
     assert "Math.ceil" in (repo / "shop/src/page.ts").read_text()
@@ -196,6 +202,23 @@ def test_fix_check_apply_undo_on_a_real_repo(server):
     status, _, result = call(server, "/api/fix/check", body)
     assert result["state"] == "conflict" and "changed since this run" in result["detail"]
     assert call(server, "/api/fix/apply", body)[0] == 400
+
+
+def test_fix_check_warns_when_the_code_changed_since_the_run(repo):
+    from pr_review_agent.config import ProjectConfig, RepoConfig
+    from pr_review_agent.ui.repos import fix_state
+
+    long_src = "".join(f"export const c{i} = {i};\n" for i in range(20)) + SRC
+    (repo / "shop/src/page.ts").write_text(long_src)
+    cfg = RepoConfig(projects=[ProjectConfig(name="shop", path="shop", language="typescript")])
+    changes = plan_edits(repo, cfg, [FixEdit(file="shop/src/page.ts", old="Math.floor", new="Math.ceil")])
+    patch, hashes = unified_patch(changes), {c.file: content_hash(c.original.encode()) for c in changes}
+    assert fix_state(str(repo), patch, hashes)["changed_since_run"] == []
+    # An edit far from the fix: the patch still applies, but it was checked against other code.
+    (repo / "shop/src/page.ts").write_text(long_src.replace("c0 = 0", "c0 = 100"))
+    state = fix_state(str(repo), patch, hashes)
+    assert state["state"] == "applies" and state["changed_since_run"] == ["shop/src/page.ts"]
+    assert "changed since this run" in state["detail"]
 
 
 def test_repo_info_and_jobs(server, repo):
