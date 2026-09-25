@@ -11,8 +11,19 @@
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wdth,wght@0,75..100,400..700;1,75..100,400..700&family=JetBrains+Mono:wght@400;600&display=swap">
   <link rel="stylesheet" href="tokens.css">
   <link rel="stylesheet" href="landing.css">
+  <link rel="stylesheet" href="motion.css">
+  <script>
+    // Opt in to motion before first paint, and fall back to a static page if motion.js never runs.
+    if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      document.documentElement.classList.add("motion");
+      setTimeout(function () {
+        if (!document.documentElement.classList.contains("motion-ready")) document.documentElement.classList.remove("motion");
+      }, 2500);
+    }
+  </script>
   <script src="landing.js" defer></script>
   <script src="site.js" defer></script>
+  <script src="motion.js" defer></script>
 </head>
 <body class="site-body">
   <div class="site">

@@ -1,0 +1,162 @@
+/* Playful motion for the public site only (the dashboard doesn't load this).
+   Everything is keyed on .motion, which the page sets only when motion is allowed,
+   so without JS or with reduced motion the page is simply static. */
+
+:root {
+  --spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --spring-soft: cubic-bezier(0.22, 1.3, 0.36, 1);
+}
+
+/* ---------- scroll progress: red pen to green proof ---------- */
+
+.scroll-pen {
+  position: fixed;
+  inset: 0 0 auto 0;
+  height: 3px;
+  z-index: 10;
+  transform-origin: 0 50%;
+  transform: scaleX(var(--p, 0));
+  background: linear-gradient(90deg, var(--red), var(--amber) 50%, var(--green));
+  pointer-events: none;
+}
+
+/* ---------- hero entrance ---------- */
+
+/* :where keeps these hide rules weak, so the .is-in rules below always win */
+.motion .site-hero :where(.hero-title, .hero-lead, .hero-actions, #proof) { opacity: 0; }
+.motion .site-hero.is-in .hero-title { opacity: 1; }
+
+.hero-title .w {
+  display: inline-block;
+  transform-origin: 50% 90%;
+}
+.motion .hero-title .w { opacity: 0; transform: translateY(0.45em) rotate(calc(var(--tilt, 1) * 6deg)) scale(0.8); }
+.motion .is-in .hero-title .w {
+  opacity: 1;
+  transform: none;
+  transition: transform 750ms var(--spring) calc(var(--i) * 70ms), opacity 300ms ease calc(var(--i) * 70ms);
+}
+
+/* the red-pen squiggle under "proves", which turns green once it is drawn */
+.pen-word { position: relative; white-space: nowrap; }
+.pen-word svg {
+  position: absolute;
+  left: -0.04em;
+  right: -0.04em;
+  bottom: -0.1em;
+  width: calc(100% + 0.08em);
+  height: 0.28em;
+  overflow: visible;
+  pointer-events: none;
+}
+.pen-word path {
+  fill: none;
+  stroke: var(--red);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 1;
+  stroke-dashoffset: 0;
+}
+.motion .pen-word path { stroke-dashoffset: 1; }
+.motion .is-in .pen-word path {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 650ms var(--ease-pen) var(--pen-delay, 700ms), stroke 500ms ease calc(var(--pen-delay, 700ms) + 900ms);
+}
+.is-in .pen-word.is-proven path { stroke: var(--green); }
+
+/* ---------- pop-in reveals ---------- */
+
+.motion .rv { opacity: 0; transform: translateY(22px) scale(0.96); }
+.motion .is-in .rv,
+.motion .site-hero.is-in :is(.hero-lead, .hero-actions, #proof) {
+  opacity: 1;
+  transform: none;
+  transition: transform 800ms var(--spring-soft) calc(var(--i, 0) * 80ms), opacity 400ms ease calc(var(--i, 0) * 80ms);
+}
+.motion .site-hero :where(.hero-lead, .hero-actions, #proof) { transform: translateY(22px) scale(0.97); }
+
+/* the evidence cards: their pen stroke draws down the left edge */
+.proof-kinds li { position: relative; }
+.motion .proof-kinds li { border-left-color: transparent; }
+.motion .proof-kinds li::before {
+  content: "";
+  position: absolute;
+  left: -3px;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--red);
+  transform: scaleY(0);
+  transform-origin: 50% 0;
+}
+.motion .proof-kinds li.is-possible::before { background: var(--amber); }
+.motion .is-in .proof-kinds li::before {
+  transform: scaleY(1);
+  transition: transform 600ms var(--ease-pen) calc(var(--i, 0) * 80ms + 250ms);
+}
+
+/* the safety ticks bounce in one after another */
+.motion .safety li::before { display: inline-block; transform: scale(0) rotate(-40deg); }
+.motion .is-in .safety li::before {
+  transform: none;
+  transition: transform 600ms var(--spring) calc(var(--i, 0) * 80ms + 300ms);
+}
+
+/* ---------- things you can poke ---------- */
+
+.site-brand .mark { transition: transform 400ms var(--spring); }
+.site-brand:hover .mark { animation: wiggle 600ms var(--ease-out); }
+@keyframes wiggle {
+  20% { transform: rotate(-12deg) scale(1.1); }
+  45% { transform: rotate(9deg); }
+  70% { transform: rotate(-5deg); }
+}
+
+.site-nav a { display: inline-block; transition: transform 350ms var(--spring), color 200ms; }
+.site-nav a:hover {
+  transform: translateY(-2px) rotate(-2deg);
+  text-decoration: underline wavy var(--red);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 5px;
+}
+
+.site-body .s-btn { transition: transform 380ms var(--spring), box-shadow 380ms var(--spring), background-color 200ms; }
+.site-body .s-btn:hover { transform: translateY(-3px) rotate(-1.5deg); box-shadow: 0 5px 0 -1px var(--rule); }
+.site-body .s-btn:active { transform: translateY(0) scale(0.93); box-shadow: none; transition-duration: 90ms; }
+.site-body .s-btn.is-copied { animation: jelly 650ms var(--ease-out); }
+@keyframes jelly {
+  25% { transform: scale(1.15, 0.85); }
+  45% { transform: scale(0.9, 1.1); }
+  65% { transform: scale(1.05, 0.95); }
+}
+
+.confetti {
+  position: fixed;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
+  animation: burst 800ms cubic-bezier(0.1, 0.8, 0.3, 1) forwards;
+}
+@keyframes burst {
+  0% { transform: translate(-50%, -50%) scale(0.4); opacity: 1; }
+  100% { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(var(--r)) scale(1); opacity: 0; }
+}
+
+.shot img { transition: transform 500ms var(--spring-soft); will-change: transform; }
+.shot.is-tilting img {
+  transform: perspective(1400px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg)) scale(1.01);
+  transition-duration: 120ms;
+}
+
+.can-do li, .proof-kinds li { transition: transform 400ms var(--spring); }
+.can-do li:hover, .proof-kinds li:hover { transform: translateY(-3px) rotate(-0.6deg); }
+
+@media (prefers-reduced-motion: reduce) {
+  .scroll-pen { display: none; }
+  .site-body *, .site-body *::before, .site-body *::after { animation: none !important; transition: none !important; }
+  .site-body .s-btn:hover, .site-nav a:hover, .can-do li:hover, .proof-kinds li:hover { transform: none; }
+}

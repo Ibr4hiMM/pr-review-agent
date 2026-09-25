@@ -6,7 +6,7 @@ out="${1:-_site}"
 static=src/pr_review_agent/ui/static
 rm -rf "$out"
 mkdir -p "$out"
-cp site/index.html site/site.js "$out/"
+cp site/index.html site/site.js site/motion.css site/motion.js "$out/"
 cp "$static/tokens.css" "$static/landing.css" "$static/landing.js" "$out/"
 cp docs/dashboard.png "$out/"
 touch "$out/.nojekyll"
